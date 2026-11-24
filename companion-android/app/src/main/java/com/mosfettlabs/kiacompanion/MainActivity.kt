@@ -195,13 +195,10 @@ class MainActivity : Activity() {
                         addView(statusButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     })
                     addView(spacer())
-                    addView(otpInput)
-                    addView(otpButton)
-                    otpButton.visibility = android.view.View.GONE
-                    addView(spacer())
                     addView(label("OTP code"))
                     addView(otpInput)
                     addView(otpButton)
+                    otpButton.visibility = android.view.View.GONE
                     addView(spacer())
                     addView(label("Output"))
                     addView(outputText)
