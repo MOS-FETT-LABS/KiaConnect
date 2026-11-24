@@ -1,0 +1,47 @@
+{
+  "name": "kia-companion-watchapp",
+  "author": "Ashley Cooper",
+  "version": "0.1",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Kia",
+    "uuid": "e024c06c-5326-4f9e-ba24-98677601ad5d",
+    "sdkVersion": "3",
+    "usesPermissions": [],
+    "enableMultiJS": true,
+    "capabilities": [],
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "companionApp": {
+      "android": {
+        "url": "https://github.com/MOS-FETT-LABS/kia-access",
+        "apps": [
+          {
+            "package": "com.mosfettlabs.kiacompanion"
+          }
+        ]
+      }
+    },
+    "messageKeys": [
+      "KIA_STATUS_REQUEST",
+      "KIA_NAME",
+      "KIA_LOCKED",
+      "KIA_FUEL",
+      "KIA_ODO",
+      "KIA_UPDATED",
+      "KIA_INFO",
+      "KIA_WATCH_READY"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}

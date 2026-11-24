@@ -1,0 +1,281 @@
+/*
+ * Kia companion watchapp — Pebble Time 2 (emery).
+ * Copyright 2026 Ashley Cooper. Apache License 2.0.
+ */
+#include <pebble.h>
+
+// Message keys (order matches package.json messageKeys).
+#define KEY_STATUS_REQUEST 0
+#define KEY_NAME 1
+#define KEY_LOCKED 2
+#define KEY_FUEL 3
+#define KEY_ODO 4
+#define KEY_UPDATED 5
+#define KEY_INFO 6
+#define KEY_WATCH_READY 7
+
+#define COLOR_BG GColorOxfordBlue
+#define COLOR_TEXT GColorWhite
+#define COLOR_MUTED GColorLightGray
+#define COLOR_ACCENT GColorJaegerGreen
+#define COLOR_BUTTON GColorCobaltBlue
+
+static Window *s_window;
+static TextLayer *s_name_layer;
+static TextLayer *s_status_layer;
+static Layer *s_fuel_layer;
+static TextLayer *s_fuel_text_layer;
+static TextLayer *s_odo_layer;
+static TextLayer *s_updated_layer;
+static TextLayer *s_info_layer;
+static TextLayer *s_button_layers[4];
+static Layer *s_button_box_layers[4];
+
+static char s_name_buf[48];
+static char s_status_buf[16];
+static char s_fuel_buf[24];
+static char s_odo_buf[24];
+static char s_updated_buf[32];
+static char s_info_buf[64];
+
+static int s_fuel_percent = -1;
+static bool s_locked = true;
+static bool s_has_status = false;
+
+static const char *BUTTON_LABELS[4] = {"Start", "Lock", "Unlock", "More"};
+static const GRect BUTTON_RECTS[4] = {
+    {{4, 186}, {46, 38}},
+    {{54, 186}, {46, 38}},
+    {{104, 186}, {46, 38}},
+    {{154, 186}, {46, 38}},
+};
+
+static void request_status(void) {
+  DictionaryIterator *iter;
+  AppMessageResult result = app_message_outbox_begin(&iter);
+  if (result != APP_MSG_OK) {
+    text_layer_set_text(s_info_layer, "Outbox busy");
+    return;
+  }
+  dict_write_uint8(iter, KEY_STATUS_REQUEST, 1);
+  dict_write_uint8(iter, KEY_WATCH_READY, 1);
+  result = app_message_outbox_send();
+  if (result != APP_MSG_OK) {
+    text_layer_set_text(s_info_layer, "Send failed");
+  } else {
+    text_layer_set_text(s_info_layer, "Requesting status…");
+  }
+}
+
+static void set_status_display(void) {
+  snprintf(s_status_buf, sizeof(s_status_buf), "%s", s_locked ? "LOCKED" : "UNLOCKED");
+  text_layer_set_text(s_status_layer, s_status_buf);
+  text_layer_set_text_color(s_status_layer, s_locked ? COLOR_TEXT : GColorJaegerGreen);
+  if (s_fuel_percent >= 0) {
+    snprintf(s_fuel_buf, sizeof(s_fuel_buf), "Fuel %d%%", s_fuel_percent);
+    text_layer_set_text(s_fuel_text_layer, s_fuel_buf);
+  }
+  layer_mark_dirty(s_fuel_layer);
+}
+
+static void prv_inbox_received(DictionaryIterator *iter, void *context) {
+  Tuple *name = dict_find(iter, KEY_NAME);
+  Tuple *locked = dict_find(iter, KEY_LOCKED);
+  Tuple *fuel = dict_find(iter, KEY_FUEL);
+  Tuple *odo = dict_find(iter, KEY_ODO);
+  Tuple *updated = dict_find(iter, KEY_UPDATED);
+  Tuple *info = dict_find(iter, KEY_INFO);
+
+  if (name) {
+    strncpy(s_name_buf, name->value->cstring, sizeof(s_name_buf) - 1);
+    s_name_buf[sizeof(s_name_buf) - 1] = '\0';
+    text_layer_set_text(s_name_layer, s_name_buf);
+  }
+  if (locked) {
+    s_locked = locked->value->int32 != 0;
+    s_has_status = true;
+    set_status_display();
+  }
+  if (fuel) {
+    s_fuel_percent = fuel->value->int32;
+    s_has_status = true;
+    set_status_display();
+  }
+  if (odo) {
+    snprintf(s_odo_buf, sizeof(s_odo_buf), "%d mi", (int)odo->value->int32);
+    text_layer_set_text(s_odo_layer, s_odo_buf);
+  }
+  if (updated) {
+    strncpy(s_updated_buf, updated->value->cstring, sizeof(s_updated_buf) - 1);
+    s_updated_buf[sizeof(s_updated_buf) - 1] = '\0';
+    text_layer_set_text(s_updated_layer, s_updated_buf);
+  }
+  if (info) {
+    strncpy(s_info_buf, info->value->cstring, sizeof(s_info_buf) - 1);
+    s_info_buf[sizeof(s_info_buf) - 1] = '\0';
+    text_layer_set_text(s_info_layer, s_info_buf);
+  }
+  if (s_has_status && !info) {
+    text_layer_set_text(s_info_layer, "");
+  }
+}
+
+static void fuel_layer_update(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  graphics_context_set_stroke_color(ctx, COLOR_MUTED);
+  graphics_draw_round_rect(ctx, bounds, 4);
+  if (s_fuel_percent < 0) {
+    return;
+  }
+  int inner_w = bounds.size.w - 4;
+  int fill_w = (inner_w * s_fuel_percent) / 100;
+  if (fill_w > 0) {
+    GRect fill = GRect(bounds.origin.x + 2, bounds.origin.y + 2, fill_w, bounds.size.h - 4);
+    graphics_context_set_fill_color(ctx, COLOR_ACCENT);
+    graphics_fill_rect(ctx, fill, 2, GCornersAll);
+  }
+}
+
+static void button_box_update(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  graphics_context_set_fill_color(ctx, COLOR_BUTTON);
+  graphics_fill_rect(ctx, bounds, 6, GCornersAll);
+}
+
+static void handle_button_tap(int index) {
+  vibes_short_pulse();
+  static const char *labels[4] = {"Start", "Lock", "Unlock", "More"};
+  snprintf(s_info_buf, sizeof(s_info_buf), "%s: remote action coming soon", labels[index]);
+  text_layer_set_text(s_info_layer, s_info_buf);
+}
+
+static void prv_touch_handler(const TouchEvent *event, void *context) {
+  if (event->type != TouchEvent_Touchdown) {
+    return;
+  }
+  for (int i = 0; i < 4; i++) {
+    if (grect_contains_point(&BUTTON_RECTS[i], &GPoint(event->x, event->y))) {
+      handle_button_tap(i);
+      return;
+    }
+  }
+}
+
+static void prv_select_click(ClickRecognizerRef recognizer, void *context) {
+  request_status();
+}
+
+static void prv_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, prv_select_click);
+}
+
+static void prv_window_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(root);
+
+  window_set_background_color(s_window, COLOR_BG);
+
+  s_name_layer = text_layer_create(GRect(0, 4, bounds.size.w, 22));
+  text_layer_set_font(s_name_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_text_alignment(s_name_layer, GTextAlignmentCenter);
+  text_layer_set_text_color(s_name_layer, COLOR_TEXT);
+  text_layer_set_background_color(s_name_layer, GColorClear);
+  text_layer_set_text(s_name_layer, "Kia");
+  layer_add_child(root, text_layer_get_layer(s_name_layer));
+
+  s_status_layer = text_layer_create(GRect(0, 30, bounds.size.w, 34));
+  text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
+  text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
+  text_layer_set_text_color(s_status_layer, COLOR_TEXT);
+  text_layer_set_background_color(s_status_layer, GColorClear);
+  text_layer_set_text(s_status_layer, "—");
+  layer_add_child(root, text_layer_get_layer(s_status_layer));
+
+  s_fuel_layer = layer_create(GRect(20, 72, bounds.size.w - 40, 14));
+  layer_set_update_proc(s_fuel_layer, fuel_layer_update);
+  layer_add_child(root, s_fuel_layer);
+
+  s_fuel_text_layer = text_layer_create(GRect(20, 88, bounds.size.w - 40, 16));
+  text_layer_set_font(s_fuel_text_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_color(s_fuel_text_layer, COLOR_MUTED);
+  text_layer_set_background_color(s_fuel_text_layer, GColorClear);
+  layer_add_child(root, text_layer_get_layer(s_fuel_text_layer));
+
+  s_odo_layer = text_layer_create(GRect(20, 106, bounds.size.w - 40, 16));
+  text_layer_set_font(s_odo_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_color(s_odo_layer, COLOR_MUTED);
+  text_layer_set_background_color(s_odo_layer, GColorClear);
+  layer_add_child(root, text_layer_get_layer(s_odo_layer));
+
+  s_updated_layer = text_layer_create(GRect(0, 126, bounds.size.w, 14));
+  text_layer_set_font(s_updated_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_updated_layer, GTextAlignmentCenter);
+  text_layer_set_text_color(s_updated_layer, COLOR_MUTED);
+  text_layer_set_background_color(s_updated_layer, GColorClear);
+  layer_add_child(root, text_layer_get_layer(s_updated_layer));
+
+  s_info_layer = text_layer_create(GRect(0, 148, bounds.size.w, 32));
+  text_layer_set_font(s_info_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_info_layer, GTextAlignmentCenter);
+  text_layer_set_text_color(s_info_layer, GColorOrange);
+  text_layer_set_background_color(s_info_layer, GColorClear);
+  text_layer_set_text(s_info_layer, "Waiting for phone…");
+  layer_add_child(root, text_layer_get_layer(s_info_layer));
+
+  for (int i = 0; i < 4; i++) {
+    s_button_box_layers[i] = layer_create(BUTTON_RECTS[i]);
+    layer_set_update_proc(s_button_box_layers[i], button_box_update);
+    layer_add_child(root, s_button_box_layers[i]);
+    s_button_layers[i] = text_layer_create(GRect(
+        BUTTON_RECTS[i].origin.x, BUTTON_RECTS[i].origin.y + 10,
+        BUTTON_RECTS[i].size.w, 18));
+    text_layer_set_font(s_button_layers[i], fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_text_alignment(s_button_layers[i], GTextAlignmentCenter);
+    text_layer_set_text_color(s_button_layers[i], COLOR_TEXT);
+    text_layer_set_background_color(s_button_layers[i], GColorClear);
+    text_layer_set_text(s_button_layers[i], BUTTON_LABELS[i]);
+    layer_add_child(root, text_layer_get_layer(s_button_layers[i]));
+  }
+
+  touch_service_subscribe(prv_touch_handler, NULL);
+  app_message_register_inbox_received(prv_inbox_received);
+  app_message_set_context(NULL);
+  app_message_open(1024, 512);
+  request_status();
+}
+
+static void prv_window_unload(Window *window) {
+  touch_service_unsubscribe();
+  for (int i = 0; i < 4; i++) {
+    text_layer_destroy(s_button_layers[i]);
+    layer_destroy(s_button_box_layers[i]);
+  }
+  text_layer_destroy(s_info_layer);
+  text_layer_destroy(s_updated_layer);
+  text_layer_destroy(s_odo_layer);
+  text_layer_destroy(s_fuel_text_layer);
+  layer_destroy(s_fuel_layer);
+  text_layer_destroy(s_status_layer);
+  text_layer_destroy(s_name_layer);
+}
+
+static void prv_init(void) {
+  s_window = window_create();
+  window_set_click_config_provider(s_window, prv_click_config_provider);
+  window_set_window_handlers(s_window, (WindowHandlers){
+    .load = prv_window_load,
+    .unload = prv_window_unload,
+  });
+  const bool animated = true;
+  window_stack_push(s_window, animated);
+}
+
+static void prv_deinit(void) {
+  window_destroy(s_window);
+}
+
+int main(void) {
+  prv_init();
+  app_event_loop();
+  prv_deinit();
+}

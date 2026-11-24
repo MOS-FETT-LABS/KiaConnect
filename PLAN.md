@@ -2,8 +2,10 @@
 
 > Remote Kia Connect control from the Pebble Time 2: lock/unlock, remote engine
 > start with climate presets, vehicle status — via the unofficial Kia Connect
-> API. Watchapp + Android companion, same archetype as Betty
-> (`docs/archetype.md`). **Safety-relevant: controls a real vehicle.**
+> API. Watchapp + Android companion following the PEBBLEDEV app archetype
+> (`docs/archetype.md`). Standalone: no third-party server, bridge, or helper
+> infrastructure — works with just the Pebble app and Android app.
+> **Safety-relevant: controls a real vehicle.**
 
 ## 0. What the user wants (source: screenshots in sandbox `PEBBLEDEV/KiaConnect/`)
 
@@ -54,7 +56,7 @@ drives the kia_uvo Home Assistant integration). Facts that matter for USA Kia:
 ```
 [ Watch: C app (emery) — status card + big action buttons + confirmations ]
         |  AppMessage (KIA_MESSAGE_KEY_*, new UUID)
-[ Phone: Betty-style Android companion (Kotlin) ]
+[ Phone: Android companion (Kotlin) ]
         |  HTTPS (Kia Connect API, legacy ciphers, token session)
 [ Kia Connect cloud ]  →  vehicle
 ```
@@ -63,12 +65,13 @@ drives the kia_uvo Home Assistant integration). Facts that matter for USA Kia:
   long sessions must live on the phone; pkjs can't hold them safely). The
   watchapp may still ship a tiny pkjs for settings sync (runtime/vehicle
   selection), but zero API calls.
-- Companion is a **new app**, not a Betty fork: package
-  `com.mosfettlabs.kiacompanion`, own repo, own UUID. Betty's PebbleKit bridge
-  pattern is the template (BillyPebbleListenerService → KiaPebbleListenerService).
-- Protocol: messageKeys mirroring Betty's (PROMPT-style replaced by
-  KIA_STATUS_REQUEST / KIA_STATUS / KIA_ACTION / KIA_ACTION_RESULT /
-  KIA_PROGRESS / etc.), contract shared with the C side.
+- Companion is a **new, independent app**: package
+  `com.mosfettlabs.kiacompanion`, own repo, own UUID, own PebbleKit listener
+  service (KiaPebbleListenerService). Shares no code or identity with other
+  apps in this workspace.
+- Protocol: its own KIA_MESSAGE_KEY_* contract, shared between the C side and
+  the companion (KIA_STATUS_REQUEST / KIA_NAME / KIA_LOCKED / KIA_ACTION /
+  KIA_ACTION_RESULT / KIA_PROGRESS etc.).
 
 ## 3. Watch UI (emery, 200×228, colors matching Kia Access)
 
@@ -89,8 +92,7 @@ drives the kia_uvo Home Assistant integration). Facts that matter for USA Kia:
   button-bar):
   - While holding: progress ring fills around the icon; releasing early cancels
     silently.
-  - On hold completion: **haptic pulse** (vibe pattern from Betty's
-    `vibes/haptic_feedback.c` palette) + progress card "Locking… (Kia takes
+  - On hold completion: **haptic pulse** (watch vibration patterns) + progress card "Locking… (Kia takes
     1–2 minutes)".
   - Unlock additionally keeps the full 4s hold requirement (no single-press
     path ever).
@@ -142,9 +144,9 @@ the app is gated behind a drawn pattern:
 - `KiaApi` — OkHttp with legacy `ConnectionSpec` (TLS compat port of
   KiaSSLAdapter), endpoints: login, vehicles/status, lock/unlock,
   start_climate/stop, force update; transaction status polling.
-- Settings UI (Betty-style single-activity): Kia username + password + optional
+- Settings UI (single-activity, plain Android views): Kia username + password + optional
   PIN, default climate preset, vehicle selection (multi-vehicle later), and a
-  **"Watch test status"** button (à la Betty's test prompt) for diagnostics.
+  **"Watch test status"** button  for diagnostics.
 - Rate-limit guardrails: local cooldowns (no force refresh more than once per
   N hours; action spacing ≥ 30s), explicit "vehicle may be asleep" states,
   blackout window option (10PM–6AM force-refresh off like kia_uvo default).

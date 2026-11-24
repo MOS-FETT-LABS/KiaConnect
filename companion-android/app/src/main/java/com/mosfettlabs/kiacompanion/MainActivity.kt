@@ -92,7 +92,11 @@ class MainActivity : Activity() {
                         otpInput.text.toString(),
                     )
                     token = newToken
-                    prefs.edit().putString("device_id", newToken.deviceId).apply()
+                    prefs.edit()
+                        .putString("device_id", newToken.deviceId)
+                        .putString("sid", newToken.sid)
+                        .putLong("sid_expiry", newToken.validUntilMs)
+                        .apply()
                     runOnUiThread {
                         otpInput.setText("")
                         smsButton.visibility = android.view.View.GONE
@@ -155,9 +159,11 @@ class MainActivity : Activity() {
                     when (result) {
                         is KiaApi.Token -> {
                             token = result
-                            if (stored == null) {
-                                prefs.edit().putString("device_id", result.deviceId).apply()
-                            }
+                            prefs.edit()
+                                .putString("device_id", result.deviceId)
+                                .putString("sid", result.sid)
+                                .putLong("sid_expiry", result.validUntilMs)
+                                .apply()
                             pendingOtp = null
                             fetchAndShowStatus("LOGIN OK (sid valid 24h)\n")
                         }
@@ -293,6 +299,7 @@ class MainActivity : Activity() {
     private fun savePrefs(prefs: android.content.SharedPreferences) {
         prefs.edit()
             .putString("username", usernameInput.text.toString().trim())
+            .putString("password", passwordInput.text.toString())
             .putString("pin", pinInput.text.toString().trim())
             .apply()
     }
