@@ -7,12 +7,12 @@ import java.util.UUID
 object KiaPebbleProtocol {
     val APP_UUID: UUID = UUID.fromString("e024c06c-5326-4f9e-ba24-98677601ad5d")
 
-    val STATUS_REQUEST: UInt = 0u
-    val NAME: UInt = 1u
-    val LOCKED: UInt = 2u
-    val FUEL: UInt = 3u
-    val ODO: UInt = 4u
-    val UPDATED: UInt = 5u
-    val INFO: UInt = 6u
-    val WATCH_READY: UInt = 7u
+    val STATUS_REQUEST: UInt = 10000u
+    val NAME: UInt = 10001u
+    val LOCKED: UInt = 10002u
+    val FUEL: UInt = 10003u
+    val ODO: UInt = 10004u
+    val UPDATED: UInt = 10005u
+    val INFO: UInt = 10006u
+    val WATCH_READY: UInt = 10007u
 }
