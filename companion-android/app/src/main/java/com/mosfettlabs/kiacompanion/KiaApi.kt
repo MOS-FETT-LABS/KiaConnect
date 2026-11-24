@@ -74,6 +74,17 @@ class KiaApi {
             // The reference stack (python-requests) speaks HTTP/1.1 only; Kia's
             // WAF appears sensitive to the protocol and header fingerprint.
             .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+            // The reference uses requests.Session: cookies persist across
+            // login + status calls. The WAF requires this.
+            .cookieJar(object : okhttp3.CookieJar {
+                private val store = mutableMapOf<String, List<okhttp3.Cookie>>()
+                override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
+                    store[url.host] = cookies
+                }
+                override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> {
+                    return store[url.host].orEmpty()
+                }
+            })
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .addInterceptor(TransparentGzipInterceptor())
