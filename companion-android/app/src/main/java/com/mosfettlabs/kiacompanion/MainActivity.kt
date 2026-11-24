@@ -25,6 +25,8 @@ class MainActivity : Activity() {
     private lateinit var passwordInput: EditText
     private lateinit var pinInput: EditText
     private lateinit var outputText: TextView
+    private lateinit var otpInput: EditText
+    private lateinit var otpButton: Button
 
     private val api = KiaApi()
     private var token: KiaApi.Token? = null
@@ -50,7 +52,7 @@ class MainActivity : Activity() {
             setPadding(dp(4), dp(4), dp(4), dp(4))
         }
 
-        val otpInput = EditText(this).apply {
+        otpInput = EditText(this).apply {
             hint = "6-digit OTP code"
             textSize = 15f
             isSingleLine = true
@@ -61,6 +63,40 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(10), dp(12), dp(10))
             visibility = android.view.View.GONE
         }
+        otpButton = button("Verify OTP") {
+            val otp = pendingOtp
+            val deviceId = pendingDeviceId
+            if (otp == null || deviceId == null) {
+                outputText.text = "No OTP pending — login first.\n"
+                return@button
+            }
+            outputText.text = "Verifying OTP…\n"
+            thread {
+                try {
+                    val newToken = api.verifyOtpAndCompleteLogin(
+                        usernameInput.text.toString().trim(),
+                        passwordInput.text.toString(),
+                        pinInput.text.toString().trim(),
+                        deviceId,
+                        otp,
+                        otpInput.text.toString(),
+                    )
+                    token = newToken
+                    prefs.edit().putString("device_id", newToken.deviceId).apply()
+                    runOnUiThread {
+                        otpInput.visibility = android.view.View.GONE
+                        otpButton.visibility = android.view.View.GONE
+                    }
+                    pendingOtp = null
+                    fetchAndShowStatus("OTP LOGIN OK (sid + device registered)\n")
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        outputText.text = "FAILED: ${e.message}\n"
+                    }
+                }
+            }
+        }
+
         val loginButton = button("Login + Status") {
             savePrefs(prefs)
             outputText.text = "Logging in…\n"
@@ -105,39 +141,6 @@ class MainActivity : Activity() {
             }
         }
 
-        val otpButton = button("Verify OTP") {
-            val otp = pendingOtp
-            val deviceId = pendingDeviceId
-            if (otp == null || deviceId == null) {
-                outputText.text = "No OTP pending — login first.\n"
-                return@button
-            }
-            outputText.text = "Verifying OTP…\n"
-            thread {
-                try {
-                    val newToken = api.verifyOtpAndCompleteLogin(
-                        usernameInput.text.toString().trim(),
-                        passwordInput.text.toString(),
-                        pinInput.text.toString().trim(),
-                        deviceId,
-                        otp,
-                        otpInput.text.toString(),
-                    )
-                    token = newToken
-                    prefs.edit().putString("device_id", newToken.deviceId).apply()
-                    runOnUiThread {
-                        otpInput.visibility = android.view.View.GONE
-                        otpButton.visibility = android.view.View.GONE
-                    }
-                    pendingOtp = null
-                    fetchAndShowStatus("OTP LOGIN OK (sid + device registered)\n")
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        outputText.text = "FAILED: ${e.message}\n"
-                    }
-                }
-            }
-        }
 
         val statusButton = button("Refresh status (cached)") {
             val t = token
@@ -195,6 +198,10 @@ class MainActivity : Activity() {
                     addView(otpInput)
                     addView(otpButton)
                     otpButton.visibility = android.view.View.GONE
+                    addView(spacer())
+                    addView(label("OTP code"))
+                    addView(otpInput)
+                    addView(otpButton)
                     addView(spacer())
                     addView(label("Output"))
                     addView(outputText)
