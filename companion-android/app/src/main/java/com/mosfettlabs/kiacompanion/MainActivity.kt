@@ -33,15 +33,23 @@ class MainActivity : Activity() {
     private lateinit var bridgeUrlInput: EditText
     private lateinit var bridgeTokenInput: EditText
 
-    private val api = KiaApi()
+    private lateinit var api: KiaApi
     private var token: KiaApi.Token? = null
     private var vehicle: KiaApi.Vehicle? = null
     private var pendingOtp: KiaApi.OtpNeeded? = null
     private var pendingDeviceId: String? = null
 
     @SuppressLint("SetTextI18n")
+    override fun onDestroy() {
+        if (this::api.isInitialized) {
+            api.shutdown()
+        }
+        super.onDestroy()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        api = KiaApi(this)
         val prefs = getSharedPreferences("kia_companion_settings", MODE_PRIVATE)
 
         usernameInput = field("Kia Connect email")
