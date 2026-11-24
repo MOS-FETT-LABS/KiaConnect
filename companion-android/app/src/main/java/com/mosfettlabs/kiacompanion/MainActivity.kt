@@ -29,6 +29,8 @@ class MainActivity : Activity() {
     private val api = KiaApi()
     private var token: KiaApi.Token? = null
     private var vehicle: KiaApi.Vehicle? = null
+    private var pendingOtp: KiaApi.OtpNeeded? = null
+    private var pendingDeviceId: String? = null
 
     @SuppressLint("SetTextI18n")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,40 +50,87 @@ class MainActivity : Activity() {
             setPadding(dp(4), dp(4), dp(4), dp(4))
         }
 
+        val otpInput = EditText(this).apply {
+            hint = "6-digit OTP code"
+            textSize = 15f
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.rgb(120, 145, 170))
+            background = rounded()
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            visibility = android.view.View.GONE
+        }
         val loginButton = button("Login + Status") {
             savePrefs(prefs)
             outputText.text = "Logging in…\n"
             thread {
                 try {
                     val stored = prefs.getString("device_id", null)
-                    token = api.login(
+                    val result = api.login(
                         usernameInput.text.toString().trim(),
                         passwordInput.text.toString(),
                         pinInput.text.toString().trim(),
                         stored,
                     )
-                    if (stored == null) {
-                        prefs.edit().putString("device_id", token!!.deviceId).apply()
-                    }
-                    val vehicles = api.getVehicles(token!!)
-                    vehicle = vehicles.first()
-                    val status = api.getCachedStatus(token!!, vehicle!!)
-                    runOnUiThread {
-                        outputText.text = buildString {
-                            append("LOGIN OK (sid valid 24h)\n")
-                            append("Vehicles: ${vehicles.size}\n")
-                            for (v in vehicles) {
-                                append("- ${v.name} (${v.model})\n")
+                    when (result) {
+                        is KiaApi.Token -> {
+                            token = result
+                            if (stored == null) {
+                                prefs.edit().putString("device_id", result.deviceId).apply()
                             }
-                            append("\nSTATUS\n")
-                            append("Vehicle: ${status.vehicle.name}\n")
-                            append("Locked: ${status.locked}\n")
-                            status.fuelLevelPercent?.let { append("Fuel level: $it%\n") }
-                            status.odometerMiles?.let { append("Odometer: ${it.toInt()} mi\n") }
-                            status.lastUpdatedUtc?.let { append("Last updated (UTC): $it\n") }
-                            append("\nK1 AUTH + STATUS PROVEN — ready for watch wiring.")
+                            pendingOtp = null
+                            fetchAndShowStatus("LOGIN OK (sid valid 24h)\n")
                         }
+                        is KiaApi.OtpNeeded -> {
+                            pendingOtp = result
+                            pendingDeviceId = stored ?: api.currentDeviceId()
+                            api.sendOtp(result, if (result.hasPhone) "sms" else "email")
+                            runOnUiThread {
+                                outputText.text =
+                                    "NEW DEVICE: Kia sent a 6-digit code to " +
+                                    (if (result.hasPhone) "your phone (SMS)" else "your email") +
+                                    ". Enter it in the OTP box and tap Verify.\n"
+                                otpInput.visibility = android.view.View.VISIBLE
+                                otpButton.visibility = android.view.View.VISIBLE
+                            }
+                        }
+                        else -> throw IllegalStateException("unexpected login result")
                     }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        outputText.text = "FAILED: ${e.message}\n"
+                    }
+                }
+            }
+        }
+
+        val otpButton = button("Verify OTP") {
+            val otp = pendingOtp
+            val deviceId = pendingDeviceId
+            if (otp == null || deviceId == null) {
+                outputText.text = "No OTP pending — login first.\n"
+                return@button
+            }
+            outputText.text = "Verifying OTP…\n"
+            thread {
+                try {
+                    val newToken = api.verifyOtpAndCompleteLogin(
+                        usernameInput.text.toString().trim(),
+                        passwordInput.text.toString(),
+                        pinInput.text.toString().trim(),
+                        deviceId,
+                        otp,
+                        otpInput.text.toString(),
+                    )
+                    token = newToken
+                    prefs.edit().putString("device_id", newToken.deviceId).apply()
+                    runOnUiThread {
+                        otpInput.visibility = android.view.View.GONE
+                        otpButton.visibility = android.view.View.GONE
+                    }
+                    pendingOtp = null
+                    fetchAndShowStatus("OTP LOGIN OK (sid + device registered)\n")
                 } catch (e: Exception) {
                     runOnUiThread {
                         outputText.text = "FAILED: ${e.message}\n"
@@ -143,12 +192,52 @@ class MainActivity : Activity() {
                         addView(statusButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     })
                     addView(spacer())
+                    addView(otpInput)
+                    addView(otpButton)
+                    otpButton.visibility = android.view.View.GONE
+                    addView(spacer())
                     addView(label("Output"))
                     addView(outputText)
                 },
             )
         }
         setContentView(root)
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun fetchAndShowStatus(prefix: String) {
+        val t = token
+        if (t == null) {
+            runOnUiThread { outputText.text = "Login first.\n" }
+            return
+        }
+        thread {
+            try {
+                val vehicles = api.getVehicles(t)
+                vehicle = vehicles.first()
+                val status = api.getCachedStatus(t, vehicle!!)
+                runOnUiThread {
+                    outputText.text = buildString {
+                        append(prefix)
+                        append("Vehicles: ${vehicles.size}\n")
+                        for (v in vehicles) {
+                            append("- ${v.name} (${v.model})\n")
+                        }
+                        append("\nSTATUS\n")
+                        append("Vehicle: ${status.vehicle.name}\n")
+                        append("Locked: ${status.locked}\n")
+                        status.fuelLevelPercent?.let { append("Fuel level: $it%\n") }
+                        status.odometerMiles?.let { append("Odometer: ${it.toInt()} mi\n") }
+                        status.lastUpdatedUtc?.let { append("Last updated (UTC): $it\n") }
+                        append("\nK1 AUTH + STATUS PROVEN — ready for watch wiring.")
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    outputText.text = "FAILED: ${e.message}\n"
+                }
+            }
+        }
     }
 
     private fun savePrefs(prefs: android.content.SharedPreferences) {

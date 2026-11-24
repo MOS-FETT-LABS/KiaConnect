@@ -49,6 +49,8 @@ class KiaApi {
 
     data class ApiError(override val message: String) : Exception(message)
 
+    private var currentDeviceId: String? = null
+
     private val client: OkHttpClient by lazy {
         // Kia USA rejects modern cipher defaults; mirror the reference's
         // SECLEVEL=1 TLSv1.2 adapter with a permissive ConnectionSpec.
@@ -69,8 +71,12 @@ class KiaApi {
             .build()
         OkHttpClient.Builder()
             .connectionSpecs(listOf(legacySpec, ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS))
+            // The reference stack (python-requests) speaks HTTP/1.1 only; Kia's
+            // WAF appears sensitive to the protocol and header fingerprint.
+            .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            .addInterceptor(TransparentGzipInterceptor())
             .addInterceptor(ErrorInterceptor())
             .build()
     }
@@ -85,6 +91,36 @@ class KiaApi {
         }
     }
 
+    /** Transparently decodes compressed bodies (OkHttp skips auto-gzip when
+     *  the caller sets accept-encoding itself, which we do to match the
+     *  reference fingerprint). */
+    private class TransparentGzipInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val response = chain.proceed(chain.request())
+            val encoding = response.header("Content-Encoding")?.lowercase(Locale.US)
+            if (encoding != "gzip" && encoding != "deflate") {
+                return response
+            }
+            val raw = response.body?.source()?.use { it.readByteArray() } ?: ByteArray(0)
+            val text = try {
+                val stream = if (encoding == "gzip") {
+                    java.util.zip.GZIPInputStream(raw.inputStream())
+                } else {
+                    java.util.zip.InflaterInputStream(raw.inputStream())
+                }
+                stream.use { it.readBytes().decodeToString() }
+            } catch (_: Exception) {
+                raw.decodeToString()
+            }
+            return response.newBuilder()
+                .body(okhttp3.ResponseBody.create(
+                    response.body?.contentType() ?: "application/json".toMediaType(),
+                    text,
+                ))
+                .build()
+        }
+    }
+
     private val jsonType = "application/json;charset=utf-8".toMediaType()
 
     fun apiHeaders(deviceId: String): MutableMap<String, String> {
@@ -96,6 +132,7 @@ class KiaApi {
         return mutableMapOf(
             "content-type" to "application/json;charset=utf-8",
             "accept" to "application/json",
+            "accept-encoding" to "gzip, deflate, br",
             "accept-language" to "en-US,en;q=0.9",
             "accept-charset" to "utf-8",
             "apptype" to "L",
@@ -127,11 +164,19 @@ class KiaApi {
         return headers
     }
 
-    fun login(username: String, password: String, pin: String, storedDeviceId: String?): Token {
+    data class OtpNeeded(
+        val otpKey: String,
+        val requestId: String,
+        val hasEmail: Boolean,
+        val hasPhone: Boolean,
+    )
+
+    fun login(username: String, password: String, pin: String, storedDeviceId: String?): Any {
         if (username.isBlank() || password.isBlank()) {
             throw ApiError("Username and password are required.")
         }
         val deviceId = storedDeviceId ?: UUID.randomUUID().toString().uppercase(Locale.US)
+        currentDeviceId = deviceId
         val body = JSONObject()
             .put("deviceKey", deviceId)
             .put("deviceType", 2)
@@ -163,9 +208,11 @@ class KiaApi {
             }
             val payload = json.optJSONObject("payload")
             if (payload != null && payload.has("otpKey")) {
-                throw ApiError(
-                    "Kia wants extra verification (OTP) for this device. " +
-                        "Open the Kia Access app and approve the new-device prompt, then retry.",
+                return OtpNeeded(
+                    otpKey = payload.optString("otpKey"),
+                    requestId = it.header("xid").orEmpty(),
+                    hasEmail = payload.optBoolean("hasEmail", false),
+                    hasPhone = payload.optBoolean("hasPhone", false),
                 )
             }
             val status = json.optJSONObject("status")
@@ -173,6 +220,87 @@ class KiaApi {
                 throw ApiError("Invalid email or password.")
             }
             throw ApiError("Login failed (HTTP ${it.code}). Response: ${text.take(160)}")
+        }
+    }
+
+    fun sendOtp(otp: OtpNeeded, notifyType: String) {
+        val headers = apiHeaders(currentDeviceId ?: throw ApiError("Log in first."))
+        headers["otpkey"] = otp.otpKey
+        headers["notifytype"] = notifyType
+        headers["xid"] = otp.requestId
+        val request = Request.Builder()
+            .url("$API_URL/cmm/sendOTP")
+            .headers(buildHeaders(headers))
+            .post(JSONObject().toString().toRequestBody(jsonType))
+            .build()
+        val response = client.newCall(request).execute()
+        response.use {
+            val text = it.body?.string().orEmpty()
+            if (it.code !in 200..299) {
+                throw ApiError("Send OTP failed (HTTP ${it.code}): ${text.take(120)}")
+            }
+        }
+    }
+
+    fun verifyOtpAndCompleteLogin(
+        username: String,
+        password: String,
+        pin: String,
+        deviceId: String,
+        otp: OtpNeeded,
+        otpCode: String,
+    ): Token {
+        val headers = apiHeaders(deviceId)
+        headers["otpkey"] = otp.otpKey
+        headers["xid"] = otp.requestId
+        val verifyRequest = Request.Builder()
+            .url("$API_URL/cmm/verifyOTP")
+            .headers(buildHeaders(headers))
+            .post(JSONObject().put("otp", otpCode.trim()).toString().toRequestBody(jsonType))
+            .build()
+        val verifyResponse = client.newCall(verifyRequest).execute()
+        verifyResponse.use {
+            val text = it.body?.string().orEmpty()
+            val sid = it.header("sid")
+            val rmtoken = it.header("rmtoken")
+            if (sid.isNullOrBlank() || rmtoken.isNullOrBlank()) {
+                val status = try {
+                    JSONObject(text).optJSONObject("status")
+                } catch (_: Exception) {
+                    null
+                }
+                throw ApiError(
+                    "OTP verification failed: ${status?.optString("errorMessage")
+                        .takeUnless { m -> m.isNullOrBlank() } ?: "no session in response (HTTP ${it.code})"}",
+                )
+            }
+            val completeHeaders = apiHeaders(deviceId)
+            completeHeaders["sid"] = sid
+            completeHeaders["rmtoken"] = rmtoken
+            val completeBody = JSONObject()
+                .put("deviceKey", deviceId)
+                .put("deviceType", 2)
+                .put("userCredential", JSONObject().put("userId", username).put("password", password))
+            val completeRequest = Request.Builder()
+                .url("$API_URL/prof/authUser")
+                .headers(buildHeaders(completeHeaders))
+                .post(completeBody.toString().toRequestBody(jsonType))
+                .build()
+            val completeResponse = client.newCall(completeRequest).execute()
+            completeResponse.use { complete ->
+                val finalSid = complete.header("sid")
+                if (finalSid.isNullOrBlank()) {
+                    throw ApiError("Login completion failed (no final sid). Response: ${complete.body?.string().orEmpty().take(160)}")
+                }
+                return Token(
+                    username = username,
+                    password = password,
+                    pin = pin,
+                    deviceId = deviceId,
+                    sid = finalSid,
+                    validUntilMs = System.currentTimeMillis() + LOGIN_TOKEN_LIFETIME_MS,
+                )
+            }
         }
     }
 
@@ -322,6 +450,8 @@ class KiaApi {
         }
         return builder.build()
     }
+
+    fun currentDeviceId(): String? = currentDeviceId
 
     companion object {
         private const val BASE_URL = "api.owners.kia.com"
