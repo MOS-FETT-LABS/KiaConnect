@@ -263,7 +263,7 @@ class KiaApi {
         val deviceId = currentDeviceId ?: throw ApiError("Log in first.")
         val headers = apiHeaders(deviceId)
         headers["otpkey"] = otp.otpKey
-        headers["notifytype"] = notifyType
+        headers["notifytype"] = notifyType.uppercase()
         headers["xid"] = otp.requestId
         val (text, _) = postJson("cmm/sendOTP", headers, JSONObject().toString())
         try {

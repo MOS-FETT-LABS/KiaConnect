@@ -31,6 +31,8 @@ class MainActivity : Activity() {
     private val api = KiaApi()
     private lateinit var otpInput: EditText
     private lateinit var otpButton: Button
+    private lateinit var smsButton: Button
+    private lateinit var emailButton: Button
 
     private var token: KiaApi.Token? = null
     private var vehicle: KiaApi.Vehicle? = null
@@ -93,6 +95,8 @@ class MainActivity : Activity() {
                     prefs.edit().putString("device_id", newToken.deviceId).apply()
                     runOnUiThread {
                         otpInput.setText("")
+                        smsButton.visibility = android.view.View.GONE
+                        emailButton.visibility = android.view.View.GONE
                     }
                     pendingOtp = null
                     fetchAndShowStatus("OTP LOGIN OK (sid + device registered)\n")
@@ -104,6 +108,38 @@ class MainActivity : Activity() {
             }
         }
 
+        smsButton = button("Send code via SMS") {
+            val otp = pendingOtp
+            if (otp == null) {
+                outputText.text = "No OTP pending — login first.\n"
+                return@button
+            }
+            outputText.text = "Requesting SMS code…\n"
+            thread {
+                try {
+                    api.sendOtp(otp, "SMS")
+                    runOnUiThread { outputText.text = "Code sent by SMS. Enter it in the OTP box and tap Verify.\n" }
+                } catch (e: Exception) {
+                    runOnUiThread { outputText.text = "FAILED: ${e.message}\n" }
+                }
+            }
+        }
+        emailButton = button("Send code via Email") {
+            val otp = pendingOtp
+            if (otp == null) {
+                outputText.text = "No OTP pending — login first.\n"
+                return@button
+            }
+            outputText.text = "Requesting email code…\n"
+            thread {
+                try {
+                    api.sendOtp(otp, "EMAIL")
+                    runOnUiThread { outputText.text = "Code sent by email. Enter it in the OTP box and tap Verify.\n" }
+                } catch (e: Exception) {
+                    runOnUiThread { outputText.text = "FAILED: ${e.message}\n" }
+                }
+            }
+        }
         val loginButton = button("Login + Status") {
             savePrefs(prefs)
             outputText.text = "Logging in…\n"
@@ -128,14 +164,14 @@ class MainActivity : Activity() {
                         is KiaApi.OtpNeeded -> {
                             pendingOtp = result
                             pendingDeviceId = stored ?: api.currentDeviceId()
-                            api.sendOtp(result, if (result.hasPhone) "sms" else "email")
                             runOnUiThread {
-                                outputText.text =
-                                    "NEW DEVICE: Kia sent a 6-digit code to " +
-                                    (if (result.hasPhone) "your phone (SMS)" else "your email") +
-                                    ". Enter it in the OTP box and tap Verify.\n"
-                                otpInput.visibility = android.view.View.VISIBLE
-                                otpButton.visibility = android.view.View.VISIBLE
+                                val dest = StringBuilder("NEW DEVICE: pick how Kia sends the 6-digit code:\n")
+                                if (result.hasPhone) dest.append("- tap 'Send code via SMS'\n")
+                                if (result.hasEmail) dest.append("- tap 'Send code via Email'\n")
+                                dest.append("then enter it in the OTP box and tap Verify.")
+                                outputText.text = dest.toString()
+                                smsButton.visibility = android.view.View.VISIBLE
+                                emailButton.visibility = android.view.View.VISIBLE
                             }
                         }
                         else -> throw IllegalStateException("unexpected login result")
@@ -205,6 +241,8 @@ class MainActivity : Activity() {
                     addView(label("OTP code"))
                     addView(otpInput)
                     addView(otpButton)
+                    addView(smsButton)
+                    addView(emailButton)
                     addView(spacer())
                     addView(copyButton)
                     addView(spacer())
