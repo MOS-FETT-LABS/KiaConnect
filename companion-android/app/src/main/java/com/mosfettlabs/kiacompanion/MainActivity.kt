@@ -314,7 +314,14 @@ class MainActivity : Activity() {
                             out.append("- ${v.optString("name")} (${v.optString("model")})\n")
                             out.append("  locked: ${v.optBoolean("locked", true)}\n")
                             v.opt("fuel_level_pct")?.let { pct -> out.append("  fuel level: $pct\n") }
-                            v.opt("odometer_miles")?.let { mi -> out.append("  odometer: ${Math.round(mi.toDouble())} mi\n") }
+                            v.opt("odometer_miles")?.let { mi ->
+                                val miles = when (mi) {
+                                    is Number -> mi.toDouble()
+                                    is String -> mi.toDoubleOrNull()
+                                    else -> null
+                                }
+                                miles?.let { m -> out.append("  odometer: ${Math.round(m)} mi\n") }
+                            }
                             v.optString("last_updated").takeIf { it.isNotBlank() }?.let { out.append("  last updated: $it\n") }
                         }
                     }
