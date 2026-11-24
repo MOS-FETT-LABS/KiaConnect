@@ -155,12 +155,22 @@ the app is gated behind a drawn pattern:
 
 - **K0 — done 2026-11-24.** Plan + UI spec from screenshots; API research
   captured here. Reference screenshots: `PEBBLEDEV/KiaConnect/` (sandbox).
-- **K1 — companion auth.** Vendor `hyundai_kia_connect_api` snapshot for
-  reference; Kotlin login + token + vehicle status working in the companion
-  UI (status text on screen proves TLS + auth before any watch work).
-- **K2 — watch home screen.** C watchapp (new UUID), status card rendering
-  from companion data, action buttons wired (no-ops), settings page,
-  **touch wiring** (tap/scroll per §3b).
+- **K1 — done 2026-11-24.** Companion auth PROVEN live: login + OTP flow
+  (uppercase SMS/EMAIL notifytype) + vehicles + cached status on device.
+  Key Cloudflare finding: the gate wants the full reference header set
+  **including `date`** and no duplicate Host — plain TLS (even the phone's
+  Conscrypt) passes with that; the Kotlin port and the JVM probe
+  (`tools/KiaTlsProbe.java`) both prove it. Webview and Brick-bridge detours
+  were abandoned (user wants a fully standalone app). Reference vendored at
+  `vendor/hyundai_kia_connect_api` @ acd9ea5.
+- **K2 — done 2026-11-24 (first pass).** Watchapp (`app/`, new UUID
+  e024c06c-…) + companion PebbleKit listener (`KiaPebbleListenerService`,
+  pebblekit2 1.2.0). Message keys are SDK-generated (10000+1*index); C and
+  Kotlin both use 10000–10007. Watch sends STATUS_REQUEST on open; companion
+  auto-relogs-in from stored credentials and pushes name/locked/fuel/odometer/
+  updated. Touch taps on the 4-button grid + Select = refresh are wired
+  (buttons are stubs until K3).
+
 - **K2b — pattern gate.** 3×3 pattern unlock (raw touch), hash persistence,
   enrollment via companion UI, lockout, re-lock policy (§3c).
 - **K3 — remote actions.** Lock/unlock + climate presets with the confirm
