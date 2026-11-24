@@ -1,17 +1,26 @@
 package com.mosfettlabs.kiacompanion
 
-import android.app.Activity
 import java.util.UUID
+import java.util.concurrent.TimeUnit
+import okhttp3.ConnectionSpec
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.TlsVersion
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
  * Kia Connect USA client (port of hyundai_kia_connect_api's KiaUvoApiUSA,
- * Apache-2.0) driven through the WebView transport, because Kia USA sits
- * behind Cloudflare which scores TLS fingerprints and only trusts browser /
- * reference stacks. Reference vendored at vendor/hyundai_kia_connect_api.
+ * Apache-2.0). Kia USA sits behind Cloudflare; the working fingerprint
+ * (proven from a JVM with tools/KiaTlsProbe.java) is: TLS 1.2 with the
+ * legacy cipher list, HTTP/1.1, the full reference header set INCLUDING
+ * `date`, and NO duplicate Host header.
  */
-class KiaApi(activity: Activity) {
+class KiaApi {
     data class Token(
         val username: String,
         val password: String,
@@ -46,57 +55,87 @@ class KiaApi(activity: Activity) {
     data class ApiError(override val message: String) : Exception(message)
 
     private var currentDeviceId: String? = null
-    private val transport = KiaWebViewTransport(activity)
 
-    private class RawResponse(val status: Int, val text: String, val headers: Map<String, String>)
-
-    private fun request(
-        method: String,
-        url: String,
-        headers: Map<String, String>,
-        body: String?,
-    ): RawResponse {
-        val response = transport.execute(url, method, headers, body)
-        val headerMap = parseResponseHeaders(response.headers)
-        return RawResponse(response.status, response.text, headerMap)
-    }
-
-    private fun parseResponseHeaders(raw: String): Map<String, String> {
-        val map = mutableMapOf<String, String>()
-        raw.split("\n", "\r").forEach { line ->
-            val idx = line.indexOf(':')
-            if (idx > 0) {
-                map[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
+    private class TransparentGzipInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val response = chain.proceed(chain.request())
+            val encoding = response.header("Content-Encoding")?.lowercase()
+            if (encoding != "gzip" && encoding != "deflate") {
+                return response
             }
+            val raw = response.body?.source()?.use { it.readByteArray() } ?: ByteArray(0)
+            val text = try {
+                val stream = if (encoding == "gzip") {
+                    java.util.zip.GZIPInputStream(raw.inputStream())
+                } else {
+                    java.util.zip.InflaterInputStream(raw.inputStream())
+                }
+                stream.use { it.readBytes().decodeToString() }
+            } catch (_: Exception) {
+                raw.decodeToString()
+            }
+            return response.newBuilder()
+                .body(okhttp3.ResponseBody.create(
+                    response.body?.contentType() ?: "application/json".toMediaType(),
+                    text,
+                ))
+                .build()
         }
-        return map
     }
 
-    private fun postJson(path: String, headers: Map<String, String>, body: String): RawResponse {
-        val response = request("POST", "$API_URL/$path", headers, body)
-        if (response.status in 500..599) {
-            throw ApiError("Kia returned HTTP ${response.status} (server-side); try again later.")
+    private class ErrorInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val response = chain.proceed(chain.request())
+            if (response.code in 500..599) {
+                throw ApiError("Kia returned HTTP ${response.code} (server-side); try again later.")
+            }
+            return response
         }
-        if (response.status == 403) {
-            throw ApiError("Kia blocked the request (HTTP 403). Response: ${response.text.take(160)}")
-        }
-        return response
     }
 
-    private fun get(path: String, headers: Map<String, String>): RawResponse {
-        val response = request("GET", "$API_URL/$path", headers, null)
-        if (response.status in 500..599) {
-            throw ApiError("Kia returned HTTP ${response.status} (server-side); try again later.")
-        }
-        if (response.status == 403) {
-            throw ApiError("Kia blocked the request (HTTP 403). Response: ${response.text.take(160)}")
-        }
-        return response
+    private val client: OkHttpClient by lazy {
+        val legacySpec = ConnectionSpec.Builder(ConnectionSpec.RESTRICTED_TLS)
+            .tlsVersions(TlsVersion.TLS_1_2)
+            .cipherSuites(
+                "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+                "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+                "TLS_RSA_WITH_AES_128_GCM_SHA256",
+                "TLS_RSA_WITH_AES_256_GCM_SHA384",
+                "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+                "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+                "TLS_RSA_WITH_AES_128_CBC_SHA",
+                "TLS_RSA_WITH_AES_256_CBC_SHA",
+                "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+                "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+            )
+            .build()
+        OkHttpClient.Builder()
+            .connectionSpecs(listOf(legacySpec, ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS))
+            .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+            .cookieJar(object : okhttp3.CookieJar {
+                private val store = mutableMapOf<String, List<okhttp3.Cookie>>()
+                override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
+                    store[url.host] = cookies
+                }
+                override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> {
+                    return store[url.host].orEmpty()
+                }
+            })
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .addInterceptor(TransparentGzipInterceptor())
+            .addInterceptor(ErrorInterceptor())
+            .build()
     }
+
+    private val jsonType = "application/json;charset=utf-8".toMediaType()
 
     fun apiHeaders(deviceId: String): MutableMap<String, String> {
         val clientUuid = UUID.nameUUIDFromBytes(deviceId.toByteArray()).toString()
         val offsetHours = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 3600000
+        val gmtDate = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.format(java.util.Date())
         return mutableMapOf(
             "content-type" to "application/json;charset=utf-8",
             "accept" to "application/json",
@@ -115,6 +154,7 @@ class KiaApi(activity: Activity) {
             "to" to "APIGW",
             "tokentype" to "A",
             "user-agent" to "KIAPrimo_iOS/37 CFNetwork/1335.0.3.4 Darwin/21.6.0",
+            "date" to gmtDate,
             "deviceid" to deviceId,
         )
     }
@@ -128,6 +168,51 @@ class KiaApi(activity: Activity) {
         return headers
     }
 
+    private fun parseResponseHeaders(raw: okhttp3.Headers): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        for (name in raw.names()) {
+            map[name.lowercase()] = raw[name].orEmpty()
+        }
+        return map
+    }
+
+    private fun execute(request: Request): Pair<Int, Pair<String, Map<String, String>>> {
+        val response = client.newCall(request).execute()
+        response.use {
+            val text = it.body?.string().orEmpty()
+            if (it.code == 403 && text.contains("<")) {
+                throw ApiError("Kia blocked the request (HTTP 403). Response: ${text.take(160)}")
+            }
+            return it.code to Pair(text, parseResponseHeaders(it.headers))
+        }
+    }
+
+    private fun postJson(path: String, headers: Map<String, String>, body: String): Pair<String, Map<String, String>> {
+        val request = Request.Builder()
+            .url("$API_URL/$path")
+            .headers(buildHeaders(headers))
+            .post(body.toRequestBody(jsonType))
+            .build()
+        val (code, pair) = execute(request)
+        if (code in 500..599) {
+            throw ApiError("Kia returned HTTP $code (server-side); try again later.")
+        }
+        return pair
+    }
+
+    private fun get(path: String, headers: Map<String, String>): Pair<String, Map<String, String>> {
+        val request = Request.Builder()
+            .url("$API_URL/$path")
+            .headers(buildHeaders(headers))
+            .get()
+            .build()
+        val (code, pair) = execute(request)
+        if (code in 500..599) {
+            throw ApiError("Kia returned HTTP $code (server-side); try again later.")
+        }
+        return pair
+    }
+
     fun login(username: String, password: String, pin: String, storedDeviceId: String?): Any {
         if (username.isBlank() || password.isBlank()) {
             throw ApiError("Username and password are required.")
@@ -139,8 +224,8 @@ class KiaApi(activity: Activity) {
             .put("deviceType", 2)
             .put("userCredential", JSONObject().put("userId", username).put("password", password))
             .put("tncFlag", 1)
-        val response = postJson("prof/authUser", apiHeaders(deviceId), body.toString())
-        val sid = response.headers["sid"]
+        val (text, headers) = postJson("prof/authUser", apiHeaders(deviceId), body.toString())
+        val sid = headers["sid"]
         if (!sid.isNullOrBlank()) {
             return Token(
                 username = username,
@@ -152,7 +237,7 @@ class KiaApi(activity: Activity) {
             )
         }
         val json = try {
-            JSONObject(response.text)
+            JSONObject(text)
         } catch (_: Exception) {
             JSONObject()
         }
@@ -160,7 +245,7 @@ class KiaApi(activity: Activity) {
         if (payload != null && payload.has("otpKey")) {
             return OtpNeeded(
                 otpKey = payload.optString("otpKey"),
-                requestId = response.headers["xid"].orEmpty(),
+                requestId = headers["xid"].orEmpty(),
                 hasEmail = payload.optBoolean("hasEmail", false),
                 hasPhone = payload.optBoolean("hasPhone", false),
             )
@@ -169,7 +254,7 @@ class KiaApi(activity: Activity) {
         if (status != null && status.optInt("errorCode", -1) == 1001) {
             throw ApiError("Invalid email or password.")
         }
-        throw ApiError("Login failed (HTTP ${response.status}). Response: ${response.text.take(160)}")
+        throw ApiError("Login failed (HTTP 200). Response: ${text.take(160)}")
     }
 
     fun currentDeviceId(): String? = currentDeviceId
@@ -180,11 +265,11 @@ class KiaApi(activity: Activity) {
         headers["otpkey"] = otp.otpKey
         headers["notifytype"] = notifyType
         headers["xid"] = otp.requestId
-        val response = postJson("cmm/sendOTP", headers, JSONObject().toString())
+        val (text, _) = postJson("cmm/sendOTP", headers, JSONObject().toString())
         try {
-            JSONObject(response.text)
+            JSONObject(text)
         } catch (_: Exception) {
-            throw ApiError("Send OTP failed: ${response.text.take(120)}")
+            throw ApiError("Send OTP failed: ${text.take(120)}")
         }
     }
 
@@ -199,23 +284,23 @@ class KiaApi(activity: Activity) {
         val headers = apiHeaders(deviceId)
         headers["otpkey"] = otp.otpKey
         headers["xid"] = otp.requestId
-        val verifyResponse = postJson(
+        val (verifyText, verifyHeaders) = postJson(
             "cmm/verifyOTP",
             headers,
             JSONObject().put("otp", otpCode.trim()).toString(),
         )
-        val sid = verifyResponse.headers["sid"]
-        val rmtoken = verifyResponse.headers["rmtoken"]
+        val sid = verifyHeaders["sid"]
+        val rmtoken = verifyHeaders["rmtoken"]
         if (sid.isNullOrBlank() || rmtoken.isNullOrBlank()) {
             val status = try {
-                JSONObject(verifyResponse.text).optJSONObject("status")
+                JSONObject(verifyText).optJSONObject("status")
             } catch (_: Exception) {
                 null
             }
             throw ApiError(
                 "OTP verification failed: ${status?.optString("errorMessage")
                     .takeUnless { m -> m.isNullOrBlank() }
-                    ?: "no session in response (HTTP ${verifyResponse.status})"}",
+                    ?: "no session in response (HTTP 200)"}",
             )
         }
         val completeHeaders = apiHeaders(deviceId)
@@ -225,10 +310,10 @@ class KiaApi(activity: Activity) {
             .put("deviceKey", deviceId)
             .put("deviceType", 2)
             .put("userCredential", JSONObject().put("userId", username).put("password", password))
-        val completeResponse = postJson("prof/authUser", completeHeaders, completeBody.toString())
-        val finalSid = completeResponse.headers["sid"]
+        val (completeText, completeHeadersOut) = postJson("prof/authUser", completeHeaders, completeBody.toString())
+        val finalSid = completeHeadersOut["sid"]
         if (finalSid.isNullOrBlank()) {
-            throw ApiError("Login completion failed (no final sid). Response: ${completeResponse.text.take(160)}")
+            throw ApiError("Login completion failed (no final sid). Response: ${completeText.take(160)}")
         }
         return Token(
             username = username,
@@ -241,11 +326,11 @@ class KiaApi(activity: Activity) {
     }
 
     fun getVehicles(token: Token): List<Vehicle> {
-        val response = get("ownr/gvl", authedHeaders(token, null))
+        val (text, _) = get("ownr/gvl", authedHeaders(token, null))
         val json = try {
-            JSONObject(response.text)
+            JSONObject(text)
         } catch (_: Exception) {
-            throw ApiError("Vehicle list failed with unparseable response (HTTP ${response.status}).")
+            throw ApiError("Vehicle list failed with unparseable response.")
         }
         checkAuthStatus(json)
         val summary = json.optJSONObject("payload")?.optJSONArray("vehicleSummary")
@@ -291,11 +376,11 @@ class KiaApi(activity: Activity) {
                     .put("weather", "0"),
             )
             .put("vinKey", JSONArray().put(vehicle.key))
-        val response = postJson("cmm/gvi", authedHeaders(token, vehicle.key), body.toString())
+        val (text, _) = postJson("cmm/gvi", authedHeaders(token, vehicle.key), body.toString())
         val json = try {
-            JSONObject(response.text)
+            JSONObject(text)
         } catch (_: Exception) {
-            throw ApiError("Status failed with unparseable response (HTTP ${response.status}).")
+            throw ApiError("Status failed with unparseable response.")
         }
         checkAuthStatus(json)
         val info = json.optJSONObject("payload")?.optJSONArray("vehicleInfoList")?.optJSONObject(0)
@@ -362,9 +447,12 @@ class KiaApi(activity: Activity) {
         }
     }
 
-    fun shutdown() {
-        transport.persistCookies()
-        transport.shutdown()
+    private fun buildHeaders(headers: Map<String, String>): okhttp3.Headers {
+        val builder = okhttp3.Headers.Builder()
+        for ((name, value) in headers) {
+            builder.add(name, value)
+        }
+        return builder.build()
     }
 
     companion object {
