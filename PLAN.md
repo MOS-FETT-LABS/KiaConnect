@@ -84,12 +84,20 @@ drives the kia_uvo Home Assistant integration). Facts that matter for USA Kia:
   - Start Custom (LOW) → temperature picker (62–83°F) + duration (5/10/15/20 min)
   - Stop Engine/Climate
   - Hazard lights (if supported), Force refresh (guarded)
-- **Safety flow (mandatory):** every remote action goes through a confirm
-  screen: action summary + **Hold Back to cancel / Select to confirm**. Unlock
-  additionally shows a short countdown before firing. No action ever fires on a
-  single accidental press.
-- Action pending state: progress card ("Locking… Kia says 1–2 minutes") with
-  the app staying alive (AppMessage keepalive) until result.
+- **Safety flow (user-approved interaction, 2026-11-24):** every function has a
+  **vector icon** and fires on a **4-second hold** on its button (touch or
+  button-bar):
+  - While holding: progress ring fills around the icon; releasing early cancels
+    silently.
+  - On hold completion: **haptic pulse** (vibe pattern from Betty's
+    `vibes/haptic_feedback.c` palette) + progress card "Locking… (Kia takes
+    1–2 minutes)".
+  - Unlock additionally keeps the full 4s hold requirement (no single-press
+    path ever).
+  - When the transaction finishes, the progress card updates ("Locked ✓" /
+    error reason) and the home status card refreshes (last-updated time).
+- Action pending state: progress card with live transaction status, app stays
+  alive (AppMessage keepalive) until the result lands.
 
 ## 3b. Touch UI (user requirement 2026-11-24)
 
