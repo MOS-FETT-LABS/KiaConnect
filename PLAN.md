@@ -91,6 +91,42 @@ drives the kia_uvo Home Assistant integration). Facts that matter for USA Kia:
 - Action pending state: progress card ("Locking… Kia says 1–2 minutes") with
   the app staying alive (AppMessage keepalive) until result.
 
+## 3b. Touch UI (user requirement 2026-11-24)
+
+Emery has a touchscreen and PebbleOS exposes a raw touch service to C apps
+(reference: coredevices/pebble-browser-app `src/c/touch_input.{c,h}` —
+`touch_service_subscribe` with `TouchEvent` phases Touchdown /
+PositionUpdate / Liftoff). This app uses touch natively:
+
+- Tappable button grid (Start/Lock/Unlock/More) and tappable preset rows with
+  pressed-state highlight.
+- Scroll on the preset/More menu via drag; edge swipes for Back (like the
+  browser app).
+- All button-bar click config still works as the fallback.
+
+## 3c. Pattern lock (user requirement 2026-11-24)
+
+The watch controlling the car must not be usable by anyone who picks it up, so
+the app is gated behind a drawn pattern:
+
+- **Gate screen on app open:** 3×3 dot grid; user traces the pattern with the
+  finger (raw touch stream); ≥4 dots required; finger lift = submit.
+- **Wrong pattern:** shake feedback + retry. After **5 consecutive failures**,
+  lockout cooldown (5 min, doubling per extra failure) — status still visible,
+  actions disabled.
+- **Storage:** only a salted hash of the dot sequence lives on the watch
+  (Pebble persistent storage). Salt + hash set during enrollment. This is a
+  deterrent, not cryptography (threat model: snatch-and-press, not firmware
+  attacks) — stated openly in the plan and the app's About screen.
+- **Enrollment:** primary path = companion app (draw the pattern on the phone
+  UI, it sends salted hash + salt over AppMessage, watch persists). Fallback =
+  on-watch enrollment (draw twice to confirm) if no companion around.
+- **Re-lock:** configurable; default re-locks when the app exits to the
+  launcher (and on watch lock screen). Status screen stays readable after
+  unlock only.
+- The gate runs BEFORE the home screen renders any action buttons; Back during
+  the gate exits the app.
+
 ## 4. Companion (Kotlin)
 
 - `KiaSession` — login, token persistence (encrypted prefs), refresh, PIN flow
@@ -113,7 +149,10 @@ drives the kia_uvo Home Assistant integration). Facts that matter for USA Kia:
   reference; Kotlin login + token + vehicle status working in the companion
   UI (status text on screen proves TLS + auth before any watch work).
 - **K2 — watch home screen.** C watchapp (new UUID), status card rendering
-  from companion data, action buttons wired (no-ops), settings page.
+  from companion data, action buttons wired (no-ops), settings page,
+  **touch wiring** (tap/scroll per §3b).
+- **K2b — pattern gate.** 3×3 pattern unlock (raw touch), hash persistence,
+  enrollment via companion UI, lockout, re-lock policy (§3c).
 - **K3 — remote actions.** Lock/unlock + climate presets with the confirm
   flow, transaction polling, pending/result cards.
 - **K4 — climate custom picker** (temp + duration), hazard/panic, force
