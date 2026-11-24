@@ -14,6 +14,8 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import kotlin.concurrent.thread
 
 /**
@@ -27,6 +29,8 @@ class MainActivity : Activity() {
     private lateinit var outputText: TextView
     private lateinit var otpInput: EditText
     private lateinit var otpButton: Button
+    private lateinit var bridgeUrlInput: EditText
+    private lateinit var bridgeTokenInput: EditText
 
     private val api = KiaApi()
     private var token: KiaApi.Token? = null
@@ -45,6 +49,29 @@ class MainActivity : Activity() {
         usernameInput.setText(prefs.getString("username", ""))
         pinInput.setText(prefs.getString("pin", ""))
 
+        bridgeUrlInput = EditText(this).apply {
+            hint = "Bridge URL (http://brick-ip:8777)"
+            textSize = 15f
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.rgb(120, 145, 170))
+            background = rounded()
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setText(prefs.getString("bridge_url", ""))
+        }
+        val bridgeButton = button("Status via bridge") { fetchStatusViaBridge() }
+        bridgeTokenInput = EditText(this).apply {
+            hint = "Bridge token"
+            textSize = 15f
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.rgb(120, 145, 170))
+            background = rounded()
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setText(prefs.getString("bridge_token", ""))
+        }
         outputText = TextView(this).apply {
             typeface = Typeface.MONOSPACE
             textSize = 13f
@@ -61,7 +88,6 @@ class MainActivity : Activity() {
             setHintTextColor(Color.rgb(120, 145, 170))
             background = rounded()
             setPadding(dp(12), dp(10), dp(12), dp(10))
-            visibility = android.view.View.GONE
         }
         otpButton = button("Verify OTP") {
             val otp = pendingOtp
@@ -84,8 +110,7 @@ class MainActivity : Activity() {
                     token = newToken
                     prefs.edit().putString("device_id", newToken.deviceId).apply()
                     runOnUiThread {
-                        otpInput.visibility = android.view.View.GONE
-                        otpButton.visibility = android.view.View.GONE
+                        otpInput.setText("")
                     }
                     pendingOtp = null
                     fetchAndShowStatus("OTP LOGIN OK (sid + device registered)\n")
@@ -198,7 +223,11 @@ class MainActivity : Activity() {
                     addView(label("OTP code"))
                     addView(otpInput)
                     addView(otpButton)
-                    otpButton.visibility = android.view.View.GONE
+                    addView(spacer())
+                    addView(label("Bridge mode (Brick PC, proven fingerprint)"))
+                    addView(bridgeUrlInput)
+                    addView(bridgeTokenInput)
+                    addView(bridgeButton)
                     addView(spacer())
                     addView(label("Output"))
                     addView(outputText)
@@ -240,6 +269,59 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     outputText.text = "FAILED: ${e.message}\n"
                 }
+            }
+        }
+    }
+
+    private fun fetchStatusViaBridge() {
+        val prefs = getSharedPreferences("kia_companion_settings", MODE_PRIVATE)
+        prefs.edit()
+            .putString("bridge_url", bridgeUrlInput.text.toString().trim())
+            .putString("bridge_token", bridgeTokenInput.text.toString().trim())
+            .apply()
+        val url = bridgeUrlInput.text.toString().trim().trimEnd('/')
+        val token = bridgeTokenInput.text.toString().trim()
+        if (url.isBlank() || token.isBlank()) {
+            outputText.text = "Bridge URL and token are required.\n"
+            return
+        }
+        outputText.text = "Asking bridge for status…\n"
+        thread {
+            try {
+                val client = okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+                val request = okhttp3.Request.Builder()
+                    .url("$url/status")
+                    .header("Authorization", "Bearer $token")
+                    .post("{}".toRequestBody("application/json".toMediaType()))
+                    .build()
+                val response = client.newCall(request).execute()
+                response.use {
+                    val text = it.body?.string().orEmpty()
+                    val json = JSONObject(text)
+                    if (!json.optBoolean("ok", false)) {
+                        runOnUiThread { outputText.text = "BRIDGE ERROR: ${json.optString("error", text.take(200))}\n" }
+                        return@use
+                    }
+                    val vehicles = json.optJSONArray("vehicles")
+                    val out = StringBuilder("BRIDGE OK\n")
+                    if (vehicles != null) {
+                        for (i in 0 until vehicles.length()) {
+                            val v = vehicles.optJSONObject(i) ?: continue
+                            out.append("- ${v.optString("name")} (${v.optString("model")})\n")
+                            out.append("  locked: ${v.optBoolean("locked", true)}\n")
+                            v.opt("fuel_level_pct")?.let { pct -> out.append("  fuel level: $pct\n") }
+                            v.opt("odometer_miles")?.let { mi -> out.append("  odometer: ${Math.round(mi.toDouble())} mi\n") }
+                            v.optString("last_updated").takeIf { it.isNotBlank() }?.let { out.append("  last updated: $it\n") }
+                        }
+                    }
+                    out.append("\nBRIDGE STATUS PROVEN — K2 (watch UI) next.")
+                    runOnUiThread { outputText.text = out.toString() }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { outputText.text = "BRIDGE FAILED: ${e.message}\n" }
             }
         }
     }
