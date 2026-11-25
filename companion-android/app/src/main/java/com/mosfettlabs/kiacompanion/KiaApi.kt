@@ -305,7 +305,6 @@ class KiaApi {
             )
         }
         val completeHeaders = apiHeaders(deviceId)
-        completeHeaders["sid"] = sid
         completeHeaders["rmtoken"] = rmtoken
         val completeBody = JSONObject()
             .put("deviceKey", deviceId)

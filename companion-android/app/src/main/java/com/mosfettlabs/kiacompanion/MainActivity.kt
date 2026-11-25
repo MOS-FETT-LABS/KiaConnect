@@ -154,7 +154,7 @@ class MainActivity : Activity() {
         android.app.AlertDialog.Builder(this)
             .setTitle("New device verification")
             .setMessage("How should Kia send the 6-digit code?")
-            .setPositiveButton("Text message (SMS)") { _, _ ->
+            .setPositiveButton("SMS") { _, _ ->
                 pendingNotifyType = "SMS"
                 sendOtpAndShowScreen(otp, "SMS")
             }
