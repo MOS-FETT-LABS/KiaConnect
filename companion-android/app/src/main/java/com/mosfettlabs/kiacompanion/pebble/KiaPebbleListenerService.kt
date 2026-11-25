@@ -36,6 +36,22 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
         ) {
             return ReceiveResult.Ack
         }
+        val actionItem = data[KiaPebbleProtocol.ACTION]
+        if (actionItem != null) {
+            val actionType = (actionItem as? PebbleDictionaryItem.UInt8)?.value ?: return ReceiveResult.Ack
+            val temp = (data[KiaPebbleProtocol.ACTION_TEMP] as? PebbleDictionaryItem.Int8)?.value ?: 0
+            val duration = ((data[KiaPebbleProtocol.ACTION_DURATION] as? PebbleDictionaryItem.UInt8)?.value ?: 0u).toInt()
+            Log.d(TAG, "Action from watch: type=$actionType temp=$temp duration=$duration")
+            val sender = DefaultPebbleSender(this)
+            try {
+                withContext(Dispatchers.IO) {
+                    runWatchAction(this@KiaPebbleListenerService, sender, watch, actionType, temp, duration)
+                }
+            } finally {
+                sender.close()
+            }
+            return ReceiveResult.Ack
+        }
         val statusRequest = data[KiaPebbleProtocol.STATUS_REQUEST] != null
         if (!statusRequest) {
             // Watch merely announced itself; acknowledge silently.
@@ -72,6 +88,62 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
             sender.close()
         }
         return ReceiveResult.Ack
+    }
+
+    private suspend fun runWatchAction(
+        context: Context,
+        sender: DefaultPebbleSender,
+        watch: WatchIdentifier,
+        actionType: Int,
+        temp: Byte,
+        duration: Int,
+    ) {
+        fun info(text: String) {
+            sender.sendDataToPebble(
+                KiaPebbleProtocol.APP_UUID,
+                mapOf(KiaPebbleProtocol.INFO to PebbleDictionaryItem.Text(text.take(60))),
+                listOf(watch),
+            )
+        }
+        fun pushStatus(status: KiaApi.VehicleStatus) {
+            val payload = mapOf(
+                KiaPebbleProtocol.NAME to PebbleDictionaryItem.Text(status.vehicle.name.take(40)),
+                KiaPebbleProtocol.LOCKED to PebbleDictionaryItem.UInt8(if (status.locked) 1 else 0),
+                KiaPebbleProtocol.FUEL to PebbleDictionaryItem.UInt8(status.fuelLevelPercent ?: -1),
+                KiaPebbleProtocol.ODO to PebbleDictionaryItem.UInt32(
+                    (status.odometerMiles?.toInt() ?: 0).toLong()),
+                KiaPebbleProtocol.UPDATED to PebbleDictionaryItem.Text(
+                    status.lastUpdatedUtc?.take(28) ?: "unknown"),
+            )
+            sender.sendDataToPebble(KiaPebbleProtocol.APP_UUID, payload, listOf(watch))
+        }
+        try {
+            val (token, vehicle) = ensureSession(context)
+            val xid: String = when (actionType) {
+                1 -> { info("Locking… Kia says 1–2 min"); api.lockAction(token, vehicle, true) }
+                2 -> { info("Unlocking… Kia says 1–2 min"); api.lockAction(token, vehicle, false) }
+                3 -> {
+                    val tempValue = if (temp.toInt() == 0) "LOW" else temp.toInt().toString()
+                    info("Starting engine (${tempValue.take(4)})…")
+                    api.startClimate(token, vehicle, tempValue, temp.toInt() != 0, if (duration in 1..30) duration else 10)
+                }
+                4 -> { info("Stopping engine…"); api.stopClimate(token, vehicle) }
+                else -> throw KiaApi.ApiError("Unknown action $actionType")
+            }
+            info("Kia is executing… (1–2 min)")
+            val outcome = api.checkActionStatus(token, vehicle, xid, 150)
+            when (outcome) {
+                KiaApi.OrderStatus.SUCCESS -> info("Done ✓")
+                KiaApi.OrderStatus.FAILED -> info("Kia reported failure — try again")
+                else -> info("Still pending — check the car/status later")
+            }
+            try {
+                pushStatus(api.getCachedStatus(token, vehicle))
+            } catch (_: Exception) {
+            }
+        } catch (e: Exception) {
+            info((e.message ?: "action failed").take(60))
+        }
     }
 
     /** Returns a live token + first vehicle, re-logging in when needed. */
