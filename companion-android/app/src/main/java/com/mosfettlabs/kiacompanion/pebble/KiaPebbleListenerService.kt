@@ -66,7 +66,7 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
             withContext(Dispatchers.IO) {
                 try {
                     val (token, vehicle) = ensureSession(this@KiaPebbleListenerService)
-                    val status = api.getCachedStatus(token, vehicle)
+                    val status = getStatusWithRetry(this@KiaPebbleListenerService, token, vehicle)
                     val payload = mapOf(
                         KiaPebbleProtocol.NAME to PebbleDictionaryItem.Text(status.vehicle.name.take(40)),
                         KiaPebbleProtocol.LOCKED to PebbleDictionaryItem.UInt8(if (status.locked) 1 else 0),
@@ -127,9 +127,15 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
                 1 -> { info("Locking… Kia says 1–2 min"); api.lockAction(token, vehicle, true) }
                 2 -> { info("Unlocking… Kia says 1–2 min"); api.lockAction(token, vehicle, false) }
                 3 -> {
-                    val tempValue = if (temp.toInt() == 0) "LOW" else temp.toInt().toString()
+                    info("Start Custom…")
+                    val cached = try {
+                        api.getCachedStatus(token, vehicle)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val tempValue = (cached?.airTempF ?: 70).let { if (it in 62..82) it.toString() else "70" }
                     info("Starting engine (${tempValue.take(4)})…")
-                    api.startClimate(token, vehicle, tempValue, temp.toInt() != 0, if (duration in 1..30) duration else 10)
+                    api.startClimate(token, vehicle, tempValue, true, if (duration in 1..30) duration else 10)
                 }
                 4 -> { info("Stopping engine…"); api.stopClimate(token, vehicle) }
                 else -> throw KiaApi.ApiError("Unknown action $actionType")
@@ -143,12 +149,34 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
                 else -> info("Still pending — check the car/status later")
             }
             try {
-                pushStatus(api.getCachedStatus(token, vehicle))
+                pushStatus(getStatusWithRetry(context, token, vehicle))
             } catch (_: Exception) {
             }
         } catch (e: Exception) {
             ServiceLog.log(context, "action error: ${e.message}")
             info((e.message ?: "action failed").take(60))
+        }
+    }
+
+    private fun dropSid(context: Context) {
+        context.getSharedPreferences("kia_companion_settings", Context.MODE_PRIVATE)
+            .edit().remove("sid").remove("sid_expiry").apply()
+    }
+
+    private fun isSessionInvalid(e: Exception): Boolean {
+        return e.message?.contains("session invalid", ignoreCase = true) == true
+    }
+
+    /** Status fetch with one automatic re-login retry when Kia invalidates the session. */
+    private fun getStatusWithRetry(context: Context, token: KiaApi.Token, vehicle: KiaApi.Vehicle): KiaApi.VehicleStatus {
+        return try {
+            api.getCachedStatus(token, vehicle)
+        } catch (e: Exception) {
+            if (!isSessionInvalid(e)) throw e
+            ServiceLog.log(context, "sid invalid — re-login")
+            dropSid(context)
+            val (fresh, freshVehicle) = ensureSession(context)
+            api.getCachedStatus(fresh, freshVehicle)
         }
     }
 

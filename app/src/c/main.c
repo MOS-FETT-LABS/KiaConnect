@@ -440,18 +440,14 @@ static void prv_show_menu(const char *title, const MenuItem *items, int count,
   Layer *root = window_get_root_layer(s_menu_window);
   GRect bounds = layer_get_bounds(root);
 
-  SimpleMenuSection section = {
-    .title = title,
-    .num_items = (uint16_t)count,
-    .items = (SimpleMenuItem[]){{}, {}, {}},
-  };
   static SimpleMenuItem s_items[3];
   for (int i = 0; i < count; i++) {
-    s_items[i] = (SimpleMenuItem){
-      .title = items[i].title,
-      .subtitle = items[i].subtitle,
-    };
+    s_items[i].title = items[i].title;
+    s_items[i].subtitle = items[i].subtitle;
   }
+  SimpleMenuSection section;
+  section.title = title;
+  section.num_items = (uint16_t)count;
   section.items = s_items;
 
   s_menu_layer = simple_menu_layer_create(bounds, s_menu_window, &section, 1,
@@ -464,7 +460,7 @@ static void show_start_menu(void) {
   static const MenuItem items[3] = {
     {"Start Cool (68° F)", "10 minutes"},
     {"Start Warm (80° F)", "10 minutes"},
-    {"Start Custom (LOW)", "10 minutes"},
+    {"Start Custom", "Car's last setting"},
   };
   prv_show_menu("Start engine", items, 3, start_menu_selected);
 }

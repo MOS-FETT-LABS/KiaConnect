@@ -43,6 +43,7 @@ class KiaApi {
         val fuelLevelPercent: Int?,
         val odometerMiles: Double?,
         val lastUpdatedUtc: String?,
+        val airTempF: Int? = null,
     )
 
     data class OtpNeeded(
@@ -414,12 +415,18 @@ class KiaApi {
                 utc?.optString("string")?.takeIf { it.isNotBlank() }
             }
         }
+        val airTemp = status?.optJSONObject("climate")
+            ?.optJSONObject("airTemp")
+            ?.opt("value")
+            ?.let { toDoubleOrNull(it) }
+            ?.toInt()
         return VehicleStatus(
             vehicle = vehicle,
             locked = locked,
             fuelLevelPercent = fuelLevel,
             odometerMiles = odometer,
             lastUpdatedUtc = lastUpdated,
+            airTempF = airTemp,
         )
     }
 
