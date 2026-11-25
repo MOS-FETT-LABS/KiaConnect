@@ -149,9 +149,7 @@ class MainActivity : Activity() {
     }
 
     private fun showOtpChoiceDialog(otp: KiaApi.OtpNeeded) {
-        val options = mutableListOf<String>()
-        if (otp.hasPhone) options.add("Text message (SMS)")
-        if (otp.hasEmail) options.add("Email")
+        val options = mutableListOf("Text message (SMS)", "Email")
         android.app.AlertDialog.Builder(this)
             .setTitle("New device verification")
             .setMessage("How should Kia send the 6-digit code?")

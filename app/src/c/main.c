@@ -43,7 +43,7 @@ static int s_hold_ticks_left = 0;
 static int16_t s_hold_start_x = -1;
 static int16_t s_hold_start_y = -1;
 static Window *s_menu_window = NULL;
-static SimpleMenuLayer *s_menu_layer = NULL;
+
 static bool s_locked = true;
 static bool s_has_status = false;
 
@@ -74,8 +74,21 @@ static void request_status(void) {
 
 static void show_start_menu(void);
 static void show_more_menu(void);
+static void menu_touch_dispatch(const TouchEvent *event);
 static void fire_action_for_button(int index);
 static void cancel_hold(void);
+
+typedef struct MenuItem {
+  const char *title;
+  const char *subtitle;
+} MenuItem;
+
+static void show_start_menu(void);
+static void show_more_menu(void);
+static void menu_touch_dispatch(const TouchEvent *event);
+static void fire_action_for_button(int index);
+static void cancel_hold(void);
+static void send_climate(int8_t temp, uint8_t duration);
 
 static void send_action(uint8_t type, int8_t temp, uint8_t duration) {
   DictionaryIterator *iter;
@@ -240,6 +253,10 @@ static void handle_button_tap(int index, int16_t x, int16_t y) {
 }
 
 static void prv_touch_handler(const TouchEvent *event, void *context) {
+  if (s_menu_window != NULL) {
+    menu_touch_dispatch(event);
+    return;
+  }
   switch (event->type) {
     case TouchEvent_Touchdown: {
       for (int i = 0; i < 4; i++) {
@@ -372,28 +389,106 @@ static void prv_window_unload(Window *window) {
 
 // ---- menus -----------------------------------------------------------------
 
-static void prv_menu_select(ClickRecognizerRef recognizer, void *context) {
-  // handled via SimpleMenuLayer selection callback
-}
+static TextLayer *s_menu_row_layers[4];
+static char s_menu_row_bufs[4][48];
+static int s_menu_item_count = 0;
+static SimpleMenuLayerSelectCallback s_menu_selected;
+static const MenuItem *s_menu_items = NULL;
 
-typedef struct MenuItem {
-  const char *title;
-  const char *subtitle;
-} MenuItem;
-
-static void send_climate(int8_t temp, uint8_t duration) {
-  send_action(ACTION_CLIMATE, temp, duration);
-  if (temp == 0) {
-    text_layer_set_text(s_info_layer, "Starting (LOW)… Kia says 1–2 min");
-  } else {
-    snprintf(s_info_buf, sizeof(s_info_buf), "Starting %d°F… Kia says 1–2 min", temp);
-    text_layer_set_text(s_info_layer, s_info_buf);
+static void menu_pop(void) {
+  if (s_menu_window != NULL) {
+    window_stack_remove(s_menu_window, true);
+    s_menu_window = NULL;
   }
 }
 
-static void start_menu_selected(int index, void *context) {
-  window_stack_remove(s_menu_window, true);
+static void menu_rows_update(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  for (int i = 0; i < s_menu_item_count; i++) {
+    GRect row = GRect(6, 42 + i * 44, bounds.size.w - 12, 40);
+    graphics_context_set_fill_color(ctx, COLOR_BUTTON);
+    graphics_fill_rect(ctx, row, 8, GCornersAll);
+  }
+}
+
+static void menu_row_tap(int index) {
+  SimpleMenuLayerSelectCallback selected = s_menu_selected;
+  void *ctx = NULL;
+  menu_pop();
+  if (selected != NULL) {
+    selected(index, ctx);
+  }
+}
+
+static void menu_touch_dispatch(const TouchEvent *event) {
+  if (event->type != TouchEvent_Touchdown || s_menu_window == NULL || s_menu_items == NULL) {
+    return;
+  }
+  for (int i = 0; i < s_menu_item_count; i++) {
+    int y = 42 + i * 44;
+    if (event->y >= y && event->y < y + 40) {
+      menu_row_tap(i);
+      return;
+    }
+  }
+}
+
+static void menu_unload(Window *window) {
+  for (int i = 0; i < 4; i++) {
+    if (s_menu_row_layers[i] != NULL) {
+      text_layer_destroy(s_menu_row_layers[i]);
+      s_menu_row_layers[i] = NULL;
+    }
+  }
   s_menu_window = NULL;
+  s_menu_items = NULL;
+}
+
+static void show_menu(const char *title, const MenuItem *items, int count,
+                      SimpleMenuLayerSelectCallback selected) {
+  if (s_menu_window != NULL) {
+    return;
+  }
+  if (count > 4) {
+    count = 4;
+  }
+  s_menu_item_count = count;
+  s_menu_selected = selected;
+  s_menu_items = items;
+
+  s_menu_window = window_create();
+  window_set_background_color(s_menu_window, COLOR_BG);
+  window_set_window_handlers(s_menu_window, (WindowHandlers){
+    .unload = menu_unload,
+  });
+  Layer *root = window_get_root_layer(s_menu_window);
+  GRect bounds = layer_get_bounds(root);
+
+  Layer *row_bg = layer_create(bounds);
+  layer_set_update_proc(row_bg, menu_rows_update);
+  layer_add_child(root, row_bg);
+
+  for (int i = 0; i < count; i++) {
+    snprintf(s_menu_row_bufs[i], sizeof(s_menu_row_bufs[i]), "%s", items[i].title);
+    s_menu_row_layers[i] = text_layer_create(GRect(14, 42 + i * 44 + 10, bounds.size.w - 28, 22));
+    text_layer_set_font(s_menu_row_layers[i], fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+    text_layer_set_text_color(s_menu_row_layers[i], COLOR_TEXT);
+    text_layer_set_background_color(s_menu_row_layers[i], GColorClear);
+    text_layer_set_text(s_menu_row_layers[i], s_menu_row_bufs[i]);
+    layer_add_child(root, text_layer_get_layer(s_menu_row_layers[i]));
+  }
+
+  TextLayer *title_layer = text_layer_create(GRect(6, 8, bounds.size.w - 12, 26));
+  text_layer_set_font(title_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_text_color(title_layer, COLOR_MUTED);
+  text_layer_set_background_color(title_layer, GColorClear);
+  text_layer_set_text(title_layer, title);
+  layer_add_child(root, text_layer_get_layer(title_layer));
+
+  window_stack_push(s_menu_window, true);
+}
+
+static void start_menu_selected(int index, void *context) {
   switch (index) {
     case 0:
       send_climate(68, 10);
@@ -408,8 +503,6 @@ static void start_menu_selected(int index, void *context) {
 }
 
 static void more_menu_selected(int index, void *context) {
-  window_stack_remove(s_menu_window, true);
-  s_menu_window = NULL;
   switch (index) {
     case 0:
       request_status();
@@ -421,39 +514,14 @@ static void more_menu_selected(int index, void *context) {
   }
 }
 
-static void prv_menu_window_unload(Window *window) {
-  simple_menu_layer_destroy(s_menu_layer);
-  s_menu_layer = NULL;
-  s_menu_window = NULL;
-}
-
-static void prv_show_menu(const char *title, const MenuItem *items, int count,
-                          SimpleMenuLayerSelectCallback selected) {
-  if (s_menu_window != NULL) {
-    return;
+static void send_climate(int8_t temp, uint8_t duration) {
+  send_action(ACTION_CLIMATE, temp, duration);
+  if (temp == 0) {
+    text_layer_set_text(s_info_layer, "Starting (LOW)… Kia says 1–2 min");
+  } else {
+    snprintf(s_info_buf, sizeof(s_info_buf), "Starting %d°F… Kia says 1–2 min", temp);
+    text_layer_set_text(s_info_layer, s_info_buf);
   }
-  s_menu_window = window_create();
-  window_set_background_color(s_menu_window, COLOR_BG);
-  window_set_window_handlers(s_menu_window, (WindowHandlers){
-    .unload = prv_menu_window_unload,
-  });
-  Layer *root = window_get_root_layer(s_menu_window);
-  GRect bounds = layer_get_bounds(root);
-
-  static SimpleMenuItem s_items[3];
-  for (int i = 0; i < count; i++) {
-    s_items[i].title = items[i].title;
-    s_items[i].subtitle = items[i].subtitle;
-  }
-  SimpleMenuSection section;
-  section.title = title;
-  section.num_items = (uint16_t)count;
-  section.items = s_items;
-
-  s_menu_layer = simple_menu_layer_create(bounds, s_menu_window, &section, 1,
-                                          selected);
-  layer_add_child(root, simple_menu_layer_get_layer(s_menu_layer));
-  window_stack_push(s_menu_window, true);
 }
 
 static void show_start_menu(void) {
@@ -462,7 +530,7 @@ static void show_start_menu(void) {
     {"Start Warm (80° F)", "10 minutes"},
     {"Start Custom", "Car's last setting"},
   };
-  prv_show_menu("Start engine", items, 3, start_menu_selected);
+  show_menu("Start engine", items, 3, start_menu_selected);
 }
 
 static void show_more_menu(void) {
@@ -470,7 +538,7 @@ static void show_more_menu(void) {
     {"Refresh status", "Fetch from Kia now"},
     {"Stop engine", "Stop climate/engine"},
   };
-  prv_show_menu("More", items, 2, more_menu_selected);
+  show_menu("More", items, 2, more_menu_selected);
 }
 
 static void prv_init(void) {
