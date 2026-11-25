@@ -149,29 +149,37 @@ class MainActivity : Activity() {
     }
 
     private fun showOtpChoiceDialog(otp: KiaApi.OtpNeeded) {
-        val options = mutableListOf("Text message (SMS)", "Email")
+        pendingNotifyType = null
+        ServiceLog.log(this, "otp dialog shown (hasPhone=${otp.hasPhone} hasEmail=${otp.hasEmail})")
         android.app.AlertDialog.Builder(this)
             .setTitle("New device verification")
             .setMessage("How should Kia send the 6-digit code?")
-            .setItems(options.toTypedArray()) { _, which ->
-                val notifyType = if (options[which].startsWith("Text")) "SMS" else "EMAIL"
-                pendingNotifyType = notifyType
-                thread {
-                    try {
-                        api.sendOtp(otp, notifyType)
-                        runOnUiThread {
-                            Toast.makeText(this, "Code sent via $notifyType", Toast.LENGTH_SHORT).show()
-                            showOtpScreen(notifyType)
-                        }
-                    } catch (e: Exception) {
-                        runOnUiThread {
-                            Toast.makeText(this, "Send failed: ${e.message}", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }
+            .setPositiveButton("Text message (SMS)") { _, _ ->
+                pendingNotifyType = "SMS"
+                sendOtpAndShowScreen(otp, "SMS")
+            }
+            .setNeutralButton("Email") { _, _ ->
+                pendingNotifyType = "EMAIL"
+                sendOtpAndShowScreen(otp, "EMAIL")
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun sendOtpAndShowScreen(otp: KiaApi.OtpNeeded, notifyType: String) {
+        thread {
+            try {
+                api.sendOtp(otp, notifyType)
+                runOnUiThread {
+                    Toast.makeText(this, "Code sent via $notifyType", Toast.LENGTH_SHORT).show()
+                    showOtpScreen(notifyType)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "Send failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     // ---------- otp screen ----------------------------------------------------
