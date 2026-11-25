@@ -15,4 +15,7 @@ object KiaPebbleProtocol {
     val UPDATED: UInt = 10005u
     val INFO: UInt = 10006u
     val WATCH_READY: UInt = 10007u
+    val ACTION: UInt = 10008u
+    val ACTION_TEMP: UInt = 10009u
+    val ACTION_DURATION: UInt = 10010u
 }

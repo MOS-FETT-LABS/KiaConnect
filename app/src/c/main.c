@@ -31,7 +31,19 @@ static char s_odo_buf[24];
 static char s_updated_buf[32];
 static char s_info_buf[64];
 
+#define ACTION_LOCK 1
+#define ACTION_UNLOCK 2
+#define ACTION_CLIMATE 3
+#define ACTION_STOP 4
+
 static int s_fuel_percent = -1;
+static AppTimer *s_hold_timer = NULL;
+static int s_hold_index = -1;
+static int s_hold_ticks_left = 0;
+static int16_t s_hold_start_x = -1;
+static int16_t s_hold_start_y = -1;
+static Window *s_menu_window = NULL;
+static SimpleMenuLayer *s_menu_layer = NULL;
 static bool s_locked = true;
 static bool s_has_status = false;
 
@@ -58,6 +70,47 @@ static void request_status(void) {
   } else {
     text_layer_set_text(s_info_layer, "Requesting status…");
   }
+}
+
+static void show_start_menu(void);
+static void show_more_menu(void);
+static void fire_action_for_button(int index);
+static void cancel_hold(void);
+
+static void send_action(uint8_t type, int8_t temp, uint8_t duration) {
+  DictionaryIterator *iter;
+  AppMessageResult result = app_message_outbox_begin(&iter);
+  if (result != APP_MSG_OK) {
+    text_layer_set_text(s_info_layer, "Outbox busy");
+    return;
+  }
+  dict_write_uint8(iter, MESSAGE_KEY_KIA_ACTION, type);
+  dict_write_int8(iter, MESSAGE_KEY_KIA_ACTION_TEMP, temp);
+  dict_write_uint8(iter, MESSAGE_KEY_KIA_ACTION_DURATION, duration);
+  result = app_message_outbox_send();
+  if (result != APP_MSG_OK) {
+    text_layer_set_text(s_info_layer, "Send failed");
+  }
+}
+
+static void hold_tick(void *data) {
+  if (s_hold_index < 0) {
+    return;
+  }
+  s_hold_ticks_left--;
+  if (s_hold_ticks_left > 0) {
+    snprintf(s_info_buf, sizeof(s_info_buf), "Hold %s… %d.%d s",
+             BUTTON_LABELS[s_hold_index],
+             s_hold_ticks_left / 10, s_hold_ticks_left % 10);
+    text_layer_set_text(s_info_layer, s_info_buf);
+    s_hold_timer = app_timer_register(100, hold_tick, NULL);
+    return;
+  }
+  int index = s_hold_index;
+  s_hold_timer = NULL;
+  s_hold_index = -1;
+  vibes_long_pulse();
+  fire_action_for_button(index);
 }
 
 static void set_status_display(void) {
@@ -135,22 +188,86 @@ static void button_box_update(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 6, GCornersAll);
 }
 
-static void handle_button_tap(int index) {
-  vibes_short_pulse();
-  static const char *labels[4] = {"Start", "Lock", "Unlock", "More"};
-  snprintf(s_info_buf, sizeof(s_info_buf), "%s: remote action coming soon", labels[index]);
-  text_layer_set_text(s_info_layer, s_info_buf);
+static void fire_action_for_button(int index) {
+  switch (index) {
+    case 1:
+      send_action(ACTION_LOCK, 0, 0);
+      text_layer_set_text(s_info_layer, "Locking… Kia says 1–2 min");
+      break;
+    case 2:
+      send_action(ACTION_UNLOCK, 0, 0);
+      text_layer_set_text(s_info_layer, "Unlocking… Kia says 1–2 min");
+      break;
+    default:
+      break;
+  }
+}
+
+static void cancel_hold(void) {
+  if (s_hold_timer != NULL) {
+    app_timer_cancel(s_hold_timer);
+    s_hold_timer = NULL;
+  }
+  if (s_hold_index >= 0) {
+    s_hold_index = -1;
+    text_layer_set_text(s_info_layer, "");
+  }
+}
+
+static void hold_tick(void *data);
+
+static void start_hold(int index, int16_t x, int16_t y) {
+  cancel_hold();
+  s_hold_index = index;
+  s_hold_ticks_left = 40;
+  s_hold_start_x = x;
+  s_hold_start_y = y;
+  s_hold_timer = app_timer_register(100, hold_tick, NULL);
+}
+
+static void handle_button_tap(int index, int16_t x, int16_t y) {
+  if (index == 0) {
+    vibes_short_pulse();
+    show_start_menu();
+    return;
+  }
+  if (index == 3) {
+    vibes_short_pulse();
+    show_more_menu();
+    return;
+  }
+  start_hold(index, x, y);
 }
 
 static void prv_touch_handler(const TouchEvent *event, void *context) {
-  if (event->type != TouchEvent_Touchdown) {
-    return;
-  }
-  for (int i = 0; i < 4; i++) {
-    if (grect_contains_point(&BUTTON_RECTS[i], &GPoint(event->x, event->y))) {
-      handle_button_tap(i);
-      return;
+  switch (event->type) {
+    case TouchEvent_Touchdown: {
+      for (int i = 0; i < 4; i++) {
+        if (grect_contains_point(&BUTTON_RECTS[i], &GPoint(event->x, event->y))) {
+          handle_button_tap(i, event->x, event->y);
+          return;
+        }
+      }
+      break;
     }
+    case TouchEvent_PositionUpdate: {
+      if (s_hold_index >= 0) {
+        int16_t dx = event->x - s_hold_start_x;
+        int16_t dy = event->y - s_hold_start_y;
+        if (dx < 0) dx = -dx;
+        if (dy < 0) dy = -dy;
+        if (dx > 20 || dy > 20) {
+          cancel_hold();
+        }
+      }
+      break;
+    }
+    case TouchEvent_Liftoff: {
+      cancel_hold();
+      break;
+    }
+    default:
+      break;
   }
 }
 
@@ -250,6 +367,113 @@ static void prv_window_unload(Window *window) {
   layer_destroy(s_fuel_layer);
   text_layer_destroy(s_status_layer);
   text_layer_destroy(s_name_layer);
+}
+
+
+// ---- menus -----------------------------------------------------------------
+
+static void prv_menu_select(ClickRecognizerRef recognizer, void *context) {
+  // handled via SimpleMenuLayer selection callback
+}
+
+typedef struct MenuItem {
+  const char *title;
+  const char *subtitle;
+} MenuItem;
+
+static void send_climate(int8_t temp, uint8_t duration) {
+  send_action(ACTION_CLIMATE, temp, duration);
+  if (temp == 0) {
+    text_layer_set_text(s_info_layer, "Starting (LOW)… Kia says 1–2 min");
+  } else {
+    snprintf(s_info_buf, sizeof(s_info_buf), "Starting %d°F… Kia says 1–2 min", temp);
+    text_layer_set_text(s_info_layer, s_info_buf);
+  }
+}
+
+static void start_menu_selected(int index, void *context) {
+  window_stack_remove(s_menu_window, true);
+  s_menu_window = NULL;
+  switch (index) {
+    case 0:
+      send_climate(68, 10);
+      break;
+    case 1:
+      send_climate(80, 10);
+      break;
+    case 2:
+      send_climate(0, 10);
+      break;
+  }
+}
+
+static void more_menu_selected(int index, void *context) {
+  window_stack_remove(s_menu_window, true);
+  s_menu_window = NULL;
+  switch (index) {
+    case 0:
+      request_status();
+      break;
+    case 1:
+      send_action(ACTION_STOP, 0, 0);
+      text_layer_set_text(s_info_layer, "Stopping engine/climate…");
+      break;
+  }
+}
+
+static void prv_menu_window_unload(Window *window) {
+  simple_menu_layer_destroy(s_menu_layer);
+  s_menu_layer = NULL;
+}
+
+static void prv_show_menu(const char *title, const MenuItem *items, int count,
+                          SimpleMenuLayerSelectCallback selected) {
+  if (s_menu_window != NULL) {
+    return;
+  }
+  s_menu_window = window_create();
+  window_set_background_color(s_menu_window, COLOR_BG);
+  window_set_window_handlers(s_menu_window, (WindowHandlers){
+    .unload = prv_menu_window_unload,
+  });
+  Layer *root = window_get_root_layer(s_menu_window);
+  GRect bounds = layer_get_bounds(root);
+
+  SimpleMenuSection section = {
+    .title = title,
+    .num_items = (uint16_t)count,
+    .items = (SimpleMenuItem[]){{}, {}, {}},
+  };
+  static SimpleMenuItem s_items[3];
+  for (int i = 0; i < count; i++) {
+    s_items[i] = (SimpleMenuItem){
+      .title = items[i].title,
+      .subtitle = items[i].subtitle,
+    };
+  }
+  section.items = s_items;
+
+  s_menu_layer = simple_menu_layer_create(bounds, s_menu_window, &section, 1,
+                                          selected);
+  layer_add_child(root, simple_menu_layer_get_layer(s_menu_layer));
+  window_stack_push(s_menu_window, true);
+}
+
+static void show_start_menu(void) {
+  static const MenuItem items[3] = {
+    {"Start Cool (68° F)", "10 minutes"},
+    {"Start Warm (80° F)", "10 minutes"},
+    {"Start Custom (LOW)", "10 minutes"},
+  };
+  prv_show_menu("Start engine", items, 3, start_menu_selected);
+}
+
+static void show_more_menu(void) {
+  static const MenuItem items[2] = {
+    {"Refresh status", "Fetch from Kia now"},
+    {"Stop engine", "Stop climate/engine"},
+  };
+  prv_show_menu("More", items, 2, more_menu_selected);
 }
 
 static void prv_init(void) {

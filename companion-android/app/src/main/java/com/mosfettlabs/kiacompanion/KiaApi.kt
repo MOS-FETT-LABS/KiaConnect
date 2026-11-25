@@ -423,6 +423,95 @@ class KiaApi {
         )
     }
 
+    enum class OrderStatus { SUCCESS, FAILED, PENDING, TIMEOUT }
+
+    fun lockAction(token: Token, vehicle: Vehicle, lock: Boolean): String {
+        val path = if (lock) "rems/door/lock" else "rems/door/unlock"
+        val (_, headers) = get(path, authedHeaders(token, vehicle.key))
+        val xid = headers["xid"]
+        if (xid.isNullOrBlank()) throw ApiError("Lock action did not return a transaction id.")
+        return xid
+    }
+
+    fun startClimate(token: Token, vehicle: Vehicle, tempValue: String, airCtrl: Boolean, durationMin: Int): String {
+        val body = JSONObject()
+            .put(
+                "remoteClimate",
+                JSONObject()
+                    .put("airTemp", JSONObject().put("unit", 1).put("value", tempValue))
+                    .put("airCtrl", airCtrl)
+                    .put("defrost", false)
+                    .put(
+                        "heatingAccessory",
+                        JSONObject()
+                            .put("rearWindow", 0)
+                            .put("sideMirror", 0)
+                            .put("steeringWheel", 0)
+                            .put("steeringWheelStep", 0),
+                    )
+                    .put("ignitionOnDuration", JSONObject().put("unit", 4).put("value", durationMin)),
+            )
+        val (_, headers) = postJson("rems/start", authedHeaders(token, vehicle.key), body.toString())
+        val xid = headers["xid"]
+        if (xid.isNullOrBlank()) throw ApiError("Climate start did not return a transaction id.")
+        return xid
+    }
+
+    fun stopClimate(token: Token, vehicle: Vehicle): String {
+        val (_, headers) = get("rems/stop", authedHeaders(token, vehicle.key))
+        val xid = headers["xid"]
+        if (xid.isNullOrBlank()) throw ApiError("Climate stop did not return a transaction id.")
+        return xid
+    }
+
+    fun checkActionStatus(token: Token, vehicle: Vehicle, actionId: String, timeoutSeconds: Int): OrderStatus {
+        val deadline = System.currentTimeMillis() + timeoutSeconds * 1000L
+        var lastJson: JSONObject? = null
+        while (System.currentTimeMillis() < deadline) {
+            val (_, _) = Unit to Unit
+            val response = postJson(
+                "cmm/gts",
+                authedHeaders(token, vehicle.key),
+                JSONObject().put("xid", actionId).toString(),
+            )
+            val json = try {
+                JSONObject(response.first)
+            } catch (_: Exception) {
+                throw ApiError("Transaction status unparseable: ${response.first.take(120)}")
+            }
+            val payload = json.optJSONObject("payload") ?: JSONObject()
+            var allZero = payload.length() > 0
+            val keys = payload.keys()
+            while (keys.hasNext()) {
+                val v = payload.opt(keys.next())
+                if ((v as? Number)?.toInt() != 0) allZero = false
+            }
+            if (payload.length() > 0 && allZero) return OrderStatus.SUCCESS
+            val status = json.optJSONObject("status")
+            if (status != null && status.optInt("errorCode", -1) == 9040) {
+                return OrderStatus.FAILED
+            }
+            lastJson = json
+            try {
+                Thread.sleep(2000)
+            } catch (_: InterruptedException) {
+                break
+            }
+        }
+        return OrderStatus.TIMEOUT
+    }
+
+    fun forceRefresh(token: Token, vehicle: Vehicle): String {
+        val (_, headers) = postJson(
+            "rems/rvs",
+            authedHeaders(token, vehicle.key),
+            JSONObject().put("requestType", 0).toString(),
+        )
+        val xid = headers["xid"]
+        if (xid.isNullOrBlank()) throw ApiError("Force refresh did not return a transaction id.")
+        return xid
+    }
+
     private fun firstObject(root: JSONObject, vararg path: String): JSONObject? {
         var cursor: JSONObject? = root
         for (key in path) {

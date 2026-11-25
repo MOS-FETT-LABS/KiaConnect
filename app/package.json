@@ -38,7 +38,10 @@
       "KIA_ODO",
       "KIA_UPDATED",
       "KIA_INFO",
-      "KIA_WATCH_READY"
+      "KIA_WATCH_READY",
+      "KIA_ACTION",
+      "KIA_ACTION_TEMP",
+      "KIA_ACTION_DURATION"
     ],
     "resources": {
       "media": []
