@@ -219,7 +219,7 @@ static void hold_tick(void *data);
 static void start_hold(int index, int16_t x, int16_t y) {
   cancel_hold();
   s_hold_index = index;
-  s_hold_ticks_left = 40;
+  s_hold_ticks_left = 30;
   s_hold_start_x = x;
   s_hold_start_y = y;
   s_hold_timer = app_timer_register(100, hold_tick, NULL);
@@ -424,6 +424,7 @@ static void more_menu_selected(int index, void *context) {
 static void prv_menu_window_unload(Window *window) {
   simple_menu_layer_destroy(s_menu_layer);
   s_menu_layer = NULL;
+  s_menu_window = NULL;
 }
 
 static void prv_show_menu(const char *title, const MenuItem *items, int count,

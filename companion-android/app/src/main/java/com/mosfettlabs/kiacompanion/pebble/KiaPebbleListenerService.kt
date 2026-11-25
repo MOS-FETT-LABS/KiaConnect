@@ -28,9 +28,11 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
         watch: WatchIdentifier,
     ): ReceiveResult {
         if (watchappUUID != KiaPebbleProtocol.APP_UUID) {
+            ServiceLog.log(this@KiaPebbleListenerService, "message for other uuid: $watchappUUID")
             return ReceiveResult.Nack
         }
         PebbleWatchStore.saveLastWatch(this@KiaPebbleListenerService, watch)
+        ServiceLog.log(this@KiaPebbleListenerService, "watch message: keys=${data.size}")
         if (data[KiaPebbleProtocol.WATCH_READY] == null &&
             data[KiaPebbleProtocol.STATUS_REQUEST] == null
         ) {
@@ -42,7 +44,7 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
             if (actionType == 0) return ReceiveResult.Ack
             val temp = (data[KiaPebbleProtocol.ACTION_TEMP] as? PebbleDictionaryItem.Int8)?.value ?: 0
             val duration = ((data[KiaPebbleProtocol.ACTION_DURATION] as? PebbleDictionaryItem.UInt8)?.value ?: 0u).toInt()
-            Log.d(TAG, "Action from watch: type=$actionType temp=$temp duration=$duration")
+            ServiceLog.log(this@KiaPebbleListenerService, "action: type=$actionType temp=$temp dur=$duration")
             val sender = DefaultPebbleSender(this)
             try {
                 withContext(Dispatchers.IO) {
@@ -58,7 +60,7 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
             // Watch merely announced itself; acknowledge silently.
             return ReceiveResult.Ack
         }
-        Log.d(TAG, "Status request from watch")
+        ServiceLog.log(this@KiaPebbleListenerService, "status request")
         val sender = DefaultPebbleSender(this)
         try {
             withContext(Dispatchers.IO) {
@@ -120,6 +122,7 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
         }
         try {
             val (token, vehicle) = ensureSession(context)
+            ServiceLog.log(context, "session ok, vehicle=${vehicle.name}")
             val xid: String = when (actionType) {
                 1 -> { info("Locking… Kia says 1–2 min"); api.lockAction(token, vehicle, true) }
                 2 -> { info("Unlocking… Kia says 1–2 min"); api.lockAction(token, vehicle, false) }
@@ -132,6 +135,7 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
                 else -> throw KiaApi.ApiError("Unknown action $actionType")
             }
             info("Kia is executing… (1–2 min)")
+            ServiceLog.log(context, "xid=$xid")
             val outcome = api.checkActionStatus(token, vehicle, xid, 150)
             when (outcome) {
                 KiaApi.OrderStatus.SUCCESS -> info("Done ✓")
@@ -143,6 +147,7 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
             } catch (_: Exception) {
             }
         } catch (e: Exception) {
+            ServiceLog.log(context, "action error: ${e.message}")
             info((e.message ?: "action failed").take(60))
         }
     }

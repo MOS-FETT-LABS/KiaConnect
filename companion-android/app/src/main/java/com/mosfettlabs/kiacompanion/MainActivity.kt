@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private lateinit var otpButton: Button
     private lateinit var smsButton: Button
     private lateinit var emailButton: Button
+    private lateinit var logText: TextView
 
     private var token: KiaApi.Token? = null
     private var vehicle: KiaApi.Vehicle? = null
@@ -55,6 +56,13 @@ class MainActivity : Activity() {
             textSize = 13f
             setTextColor(Color.rgb(190, 220, 240))
             setTextIsSelectable(true)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        val refreshLogButton = button("Service log") { showServiceLog() }
+        logText = TextView(this).apply {
+            typeface = Typeface.MONOSPACE
+            textSize = 11f
+            setTextColor(Color.rgb(150, 190, 220))
             setPadding(dp(4), dp(4), dp(4), dp(4))
         }
         val copyButton = button("Copy output") {
@@ -251,6 +259,10 @@ class MainActivity : Activity() {
                     addView(emailButton)
                     addView(spacer())
                     addView(copyButton)
+                    addView(refreshLogButton)
+                    addView(spacer())
+                    addView(label("Service log"))
+                    addView(logText)
                     addView(spacer())
                     addView(label("Output"))
                     addView(outputText)
@@ -294,6 +306,10 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun showServiceLog() {
+        logText.text = com.mosfettlabs.kiacompanion.pebble.ServiceLog.read(this)
     }
 
     private fun savePrefs(prefs: android.content.SharedPreferences) {
