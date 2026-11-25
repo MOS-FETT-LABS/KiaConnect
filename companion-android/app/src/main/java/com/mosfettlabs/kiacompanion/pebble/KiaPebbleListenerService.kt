@@ -38,7 +38,8 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
         }
         val actionItem = data[KiaPebbleProtocol.ACTION]
         if (actionItem != null) {
-            val actionType = (actionItem as? PebbleDictionaryItem.UInt8)?.value ?: return ReceiveResult.Ack
+            val actionType = ((actionItem as? PebbleDictionaryItem.UInt8)?.value ?: 0u).toInt()
+            if (actionType == 0) return ReceiveResult.Ack
             val temp = (data[KiaPebbleProtocol.ACTION_TEMP] as? PebbleDictionaryItem.Int8)?.value ?: 0
             val duration = ((data[KiaPebbleProtocol.ACTION_DURATION] as? PebbleDictionaryItem.UInt8)?.value ?: 0u).toInt()
             Log.d(TAG, "Action from watch: type=$actionType temp=$temp duration=$duration")
@@ -98,14 +99,14 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
         temp: Byte,
         duration: Int,
     ) {
-        fun info(text: String) {
+        suspend fun info(text: String) {
             sender.sendDataToPebble(
                 KiaPebbleProtocol.APP_UUID,
                 mapOf(KiaPebbleProtocol.INFO to PebbleDictionaryItem.Text(text.take(60))),
                 listOf(watch),
             )
         }
-        fun pushStatus(status: KiaApi.VehicleStatus) {
+        suspend fun pushStatus(status: KiaApi.VehicleStatus) {
             val payload = mapOf(
                 KiaPebbleProtocol.NAME to PebbleDictionaryItem.Text(status.vehicle.name.take(40)),
                 KiaPebbleProtocol.LOCKED to PebbleDictionaryItem.UInt8(if (status.locked) 1 else 0),
