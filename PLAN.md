@@ -154,6 +154,8 @@ the app is gated behind a drawn pattern:
 ## Versioning convention (user decision 2026-11-25)
 
 Alpha (development) builds: `0.<n>a` → artifacts `KiaConnect_v0-<n>a.apk/.pbw`.
+The Pebble `package.json` version stays numeric (the SDK packager requires it);
+the alpha suffix lives in the Android `versionName` and artifact filenames.
 The first App Store release will be **0.1**.
 
 ## 5. Milestones
