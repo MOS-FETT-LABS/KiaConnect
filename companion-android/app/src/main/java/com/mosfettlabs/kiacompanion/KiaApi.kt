@@ -133,6 +133,7 @@ class KiaApi {
     private val jsonType = "application/json;charset=utf-8".toMediaType()
 
     fun apiHeaders(deviceId: String): MutableMap<String, String> {
+        val clientUuid = UUID.nameUUIDFromBytes(deviceId.toByteArray()).toString()
         val offsetHours = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 3600000
         val gmtDate = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US).apply {
             timeZone = java.util.TimeZone.getTimeZone("UTC")
@@ -144,7 +145,7 @@ class KiaApi {
             "apptype" to "L",
             "appversion" to "7.22.0",
             "clientid" to "SPACL716-APL",
-            "clientuuid" to deviceId,
+            "clientuuid" to clientUuid,
             "from" to "SPA",
             "language" to "0",
             "offset" to offsetHours.toString(),
@@ -214,7 +215,7 @@ class KiaApi {
         return pair
     }
 
-    fun login(username: String, password: String, pin: String, storedDeviceId: String?, storedRmtoken: String? = null): Any {
+    fun login(username: String, password: String, pin: String, storedDeviceId: String?, storedRmtoken: String? = null, storedSid: String? = null): Any {
         if (username.isBlank() || password.isBlank()) {
             throw ApiError("Username and password are required.")
         }
@@ -222,13 +223,13 @@ class KiaApi {
         currentDeviceId = deviceId
         if (!storedRmtoken.isNullOrBlank()) {
             try {
-                return refreshWithRmtoken(username, password, pin, deviceId, storedRmtoken)
+                return refreshWithRmtoken(username, password, pin, deviceId, storedRmtoken, storedSid)
             } catch (_: ApiError) {
                 // fall through to the full MFA flow (rmtoken expired or device changed)
             }
         }
         val body = JSONObject()
-            .put("deviceKey", "")
+            .put("deviceKey", deviceId)
             .put("deviceType", 2)
             .put("userCredential", JSONObject().put("userId", username).put("password", password))
             .put("tncFlag", 1)
@@ -267,15 +268,18 @@ class KiaApi {
 
     fun currentDeviceId(): String? = currentDeviceId
 
-    /** Step 4: mint a fresh sid from the persisted rmtoken (no MFA). */
+    /** Step 4: mint a fresh sid from the persisted sid+rmtoken (no MFA).
+     *  Shape matches the combination proven working on-device (K1). */
     private fun refreshWithRmtoken(
         username: String,
         password: String,
         pin: String,
         deviceId: String,
         rmtoken: String,
+        storedSid: String? = null,
     ): Token {
         val headers = apiHeaders(deviceId)
+        storedSid?.takeIf { it.isNotBlank() }?.let { headers["sid"] = it }
         headers["rmtoken"] = rmtoken
         val body = JSONObject()
             .put("deviceKey", deviceId)
@@ -351,6 +355,7 @@ class KiaApi {
             )
         }
         val completeHeaders = apiHeaders(deviceId)
+        completeHeaders["sid"] = sid
         completeHeaders["rmtoken"] = rmtoken
         val completeBody = JSONObject()
             .put("deviceKey", deviceId)

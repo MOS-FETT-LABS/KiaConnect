@@ -207,7 +207,7 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
                 validUntilMs = expiry,
             )
         } else {
-            val fresh = api.login(username, password, pin, deviceId, storedRmtoken) as? KiaApi.Token
+            val fresh = api.login(username, password, pin, deviceId, storedRmtoken, sid) as? KiaApi.Token
                 ?: throw KiaApi.ApiError("Kia wants device verification again — open the phone app and log in.")
             prefs.edit()
                 .putString("device_id", fresh.deviceId)

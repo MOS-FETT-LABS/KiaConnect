@@ -129,6 +129,7 @@ class MainActivity : Activity() {
                     getPrefs().getString("pin", "").orEmpty(),
                     getPrefs().getString("device_id", null),
                     getPrefs().getString("rmtoken", null),
+                    getPrefs().getString("sid", null),
                 )
                 when (result) {
                     is KiaApi.Token -> {
@@ -360,7 +361,10 @@ class MainActivity : Activity() {
                 ServiceLog.log(this, "sid invalid — re-login")
             }
         }
-        val fresh = api.login(username, password, pin, deviceId, prefs.getString("rmtoken", null)) as? KiaApi.Token
+        val fresh = api.login(
+            username, password, pin, deviceId,
+            prefs.getString("rmtoken", null), prefs.getString("sid", null),
+        ) as? KiaApi.Token
             ?: throw KiaApi.ApiError("Kia wants device verification — log in again to approve.")
         persistSession(fresh)
         val veh = vehicle ?: resolveVehicle(fresh)
