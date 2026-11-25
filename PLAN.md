@@ -151,6 +151,11 @@ the app is gated behind a drawn pattern:
   N hours; action spacing ≥ 30s), explicit "vehicle may be asleep" states,
   blackout window option (10PM–6AM force-refresh off like kia_uvo default).
 
+## Versioning convention (user decision 2026-11-25)
+
+Alpha (development) builds: `0.<n>a` → artifacts `KiaConnect_v0-<n>a.apk/.pbw`.
+The first App Store release will be **0.1**.
+
 ## 5. Milestones
 
 - **K0 — done 2026-11-24.** Plan + UI spec from screenshots; API research
