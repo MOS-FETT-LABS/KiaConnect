@@ -6,355 +6,447 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
+import android.widget.Toast
+import com.mosfettlabs.kiacompanion.pebble.PebbleWatchStore
+import com.mosfettlabs.kiacompanion.pebble.ServiceLog
 import kotlin.concurrent.thread
 
 /**
- * K1 diagnostics UI: prove Kia login + TLS + status fetch on the device.
- * Everything is shown as plain text so failures are legible.
+ * Kia Companion UI: login wizard (credentials → OTP choice popup → OTP) →
+ * status screen with car info, output, service log, and a Pebble connection
+ * indicator. Output and log are selectable text (long-press).
  */
 class MainActivity : Activity() {
-    private lateinit var usernameInput: EditText
-    private lateinit var passwordInput: EditText
-    private lateinit var pinInput: EditText
-    private lateinit var outputText: TextView
     private val api = KiaApi()
-    private lateinit var otpInput: EditText
-    private lateinit var otpButton: Button
-    private lateinit var smsButton: Button
-    private lateinit var emailButton: Button
-    private lateinit var logText: TextView
-
     private var token: KiaApi.Token? = null
     private var vehicle: KiaApi.Vehicle? = null
     private var pendingOtp: KiaApi.OtpNeeded? = null
     private var pendingDeviceId: String? = null
+    private var pendingNotifyType: String? = null
 
-    @SuppressLint("SetTextI18n")
+    private lateinit var rootScroll: ScrollView
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var statusText: TextView
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var indicatorRunnable: Runnable? = null
+
+    private val colorText = Color.rgb(233, 240, 246)
+    private val colorMuted = Color.rgb(140, 165, 190)
+    private val colorBg = Color.rgb(13, 27, 42)
+    private val colorField = Color.rgb(23, 41, 63)
+    private val colorStroke = Color.rgb(45, 70, 100)
+    private val colorAccent = Color.rgb(11, 87, 164)
+    private val colorGreen = Color.rgb(55, 178, 77)
+    private val colorRed = Color.rgb(214, 69, 69)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val prefs = getSharedPreferences("kia_companion_settings", MODE_PRIVATE)
+        rootScroll = ScrollView(this).apply {
+            setBackgroundColor(colorBg)
+        }
+        rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(24), dp(18), dp(24))
+        }
+        rootScroll.addView(rootLayout)
+        setContentView(rootScroll)
 
-        usernameInput = field("Kia Connect email")
-        passwordInput = field("Password", password = true)
-        pinInput = field("PIN (if your account uses one)", password = true)
-        usernameInput.setText(prefs.getString("username", ""))
-        pinInput.setText(prefs.getString("pin", ""))
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val sid = prefs.getString("sid", null)
+        val expiry = prefs.getLong("sid_expiry", 0)
+        val username = prefs.getString("username", "").orEmpty()
+        if (!sid.isNullOrBlank() && expiry > System.currentTimeMillis() && username.isNotBlank()) {
+            showStatusScreen()
+        } else {
+            showLoginScreen()
+        }
+    }
 
-        outputText = TextView(this).apply {
-            typeface = Typeface.MONOSPACE
-            textSize = 13f
-            setTextColor(Color.rgb(190, 220, 240))
-            setTextIsSelectable(true)
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-        }
-        val refreshLogButton = button("Service log") { showServiceLog() }
-        logText = TextView(this).apply {
-            typeface = Typeface.MONOSPACE
-            textSize = 11f
-            setTextColor(Color.rgb(150, 190, 220))
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-        }
-        val copyButton = button("Copy output") {
-            val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("kia", outputText.text))
-            android.widget.Toast.makeText(this, "Output copied", android.widget.Toast.LENGTH_SHORT).show()
-        }
+    override fun onDestroy() {
+        indicatorRunnable?.let { uiHandler.removeCallbacks(it) }
+        super.onDestroy()
+    }
 
-        otpInput = EditText(this).apply {
-            hint = "6-digit OTP code"
-            textSize = 15f
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.rgb(120, 145, 170))
-            background = rounded()
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        otpButton = button("Verify OTP") {
-            val otp = pendingOtp
-            val deviceId = pendingDeviceId
-            if (otp == null || deviceId == null) {
-                outputText.text = "No OTP pending — login first.\n"
-                return@button
+    private fun clearContent() {
+        rootLayout.removeAllViews()
+    }
+
+    // ---------- login screen -------------------------------------------------
+
+    private fun showLoginScreen() {
+        clearContent()
+        addView(title("Kia Companion"))
+        addView(subtitle("Sign in to Kia Connect"))
+
+        val usernameInput = field("Email", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS)
+        usernameInput.setText(getPrefs().getString("username", ""))
+        val passwordInput = field("Password", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD, imeDone = true)
+        passwordInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                doLogin(usernameInput, passwordInput)
+                true
+            } else {
+                false
             }
-            outputText.text = "Verifying OTP…\n"
-            thread {
-                try {
-                    val newToken = api.verifyOtpAndCompleteLogin(
-                        usernameInput.text.toString().trim(),
-                        passwordInput.text.toString(),
-                        pinInput.text.toString().trim(),
-                        deviceId,
-                        otp,
-                        otpInput.text.toString(),
-                    )
-                    token = newToken
-                    prefs.edit()
-                        .putString("device_id", newToken.deviceId)
-                        .putString("sid", newToken.sid)
-                        .putLong("sid_expiry", newToken.validUntilMs)
-                        .apply()
-                    runOnUiThread {
-                        otpInput.setText("")
-                        smsButton.visibility = android.view.View.GONE
-                        emailButton.visibility = android.view.View.GONE
+        }
+
+        addView(label("Email"))
+        addView(usernameInput)
+        addView(spacer())
+        addView(label("Password"))
+        addView(passwordInput)
+        addView(spacer())
+        addView(button("Login") { doLogin(usernameInput, passwordInput) })
+        addView(spacer())
+        statusText = outputLine()
+        addView(statusText)
+    }
+
+    private fun doLogin(usernameInput: EditText, passwordInput: EditText) {
+        val username = usernameInput.text.toString().trim()
+        val password = passwordInput.text.toString()
+        if (username.isBlank() || password.isBlank()) {
+            statusText.text = "Email and password are required."
+            return
+        }
+        statusText.text = "Logging in…"
+        thread {
+            try {
+                val result = api.login(
+                    username,
+                    password,
+                    getPrefs().getString("pin", "").orEmpty(),
+                    getPrefs().getString("device_id", null),
+                )
+                when (result) {
+                    is KiaApi.Token -> {
+                        persistSession(result)
+                        pendingOtp = null
+                        runOnUiThread { showStatusScreen(autoFetch = true) }
                     }
-                    pendingOtp = null
-                    fetchAndShowStatus("OTP LOGIN OK (sid + device registered)\n")
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        outputText.text = "FAILED: ${e.message}\n"
+                    is KiaApi.OtpNeeded -> {
+                        pendingOtp = result
+                        pendingDeviceId = getPrefs().getString("device_id", null) ?: api.currentDeviceId()
+                        runOnUiThread { showOtpChoiceDialog(result) }
                     }
+                    else -> throw IllegalStateException("unexpected login result")
                 }
+            } catch (e: Exception) {
+                runOnUiThread { statusText.text = "FAILED: ${e.message}" }
             }
         }
+    }
 
-        smsButton = button("Send code via SMS") {
-            val otp = pendingOtp
-            if (otp == null) {
-                outputText.text = "No OTP pending — login first.\n"
-                return@button
-            }
-            outputText.text = "Requesting SMS code…\n"
-            thread {
-                try {
-                    api.sendOtp(otp, "SMS")
-                    runOnUiThread { outputText.text = "Code sent by SMS. Enter it in the OTP box and tap Verify.\n" }
-                } catch (e: Exception) {
-                    runOnUiThread { outputText.text = "FAILED: ${e.message}\n" }
-                }
-            }
-        }
-        emailButton = button("Send code via Email") {
-            val otp = pendingOtp
-            if (otp == null) {
-                outputText.text = "No OTP pending — login first.\n"
-                return@button
-            }
-            outputText.text = "Requesting email code…\n"
-            thread {
-                try {
-                    api.sendOtp(otp, "EMAIL")
-                    runOnUiThread { outputText.text = "Code sent by email. Enter it in the OTP box and tap Verify.\n" }
-                } catch (e: Exception) {
-                    runOnUiThread { outputText.text = "FAILED: ${e.message}\n" }
-                }
-            }
-        }
-        val loginButton = button("Login + Status") {
-            savePrefs(prefs)
-            outputText.text = "Logging in…\n"
-            thread {
-                try {
-                    val stored = prefs.getString("device_id", null)
-                    val result = api.login(
-                        usernameInput.text.toString().trim(),
-                        passwordInput.text.toString(),
-                        pinInput.text.toString().trim(),
-                        stored,
-                    )
-                    when (result) {
-                        is KiaApi.Token -> {
-                            token = result
-                            prefs.edit()
-                                .putString("device_id", result.deviceId)
-                                .putString("sid", result.sid)
-                                .putLong("sid_expiry", result.validUntilMs)
-                                .apply()
-                            pendingOtp = null
-                            fetchAndShowStatus("LOGIN OK (sid valid 24h)\n")
+    private fun showOtpChoiceDialog(otp: KiaApi.OtpNeeded) {
+        val options = mutableListOf<String>()
+        if (otp.hasPhone) options.add("Text message (SMS)")
+        if (otp.hasEmail) options.add("Email")
+        android.app.AlertDialog.Builder(this)
+            .setTitle("New device verification")
+            .setMessage("How should Kia send the 6-digit code?")
+            .setItems(options.toTypedArray()) { _, which ->
+                val notifyType = if (options[which].startsWith("Text")) "SMS" else "EMAIL"
+                pendingNotifyType = notifyType
+                thread {
+                    try {
+                        api.sendOtp(otp, notifyType)
+                        runOnUiThread {
+                            Toast.makeText(this, "Code sent via $notifyType", Toast.LENGTH_SHORT).show()
+                            showOtpScreen(notifyType)
                         }
-                        is KiaApi.OtpNeeded -> {
-                            pendingOtp = result
-                            pendingDeviceId = stored ?: api.currentDeviceId()
-                            runOnUiThread {
-                                val dest = StringBuilder("NEW DEVICE: pick how Kia sends the 6-digit code:\n")
-                                if (result.hasPhone) dest.append("- tap 'Send code via SMS'\n")
-                                if (result.hasEmail) dest.append("- tap 'Send code via Email'\n")
-                                dest.append("then enter it in the OTP box and tap Verify.")
-                                outputText.text = dest.toString()
-                                smsButton.visibility = android.view.View.VISIBLE
-                                emailButton.visibility = android.view.View.VISIBLE
-                            }
-                        }
-                        else -> throw IllegalStateException("unexpected login result")
-                    }
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        outputText.text = "FAILED: ${e.message}\n"
-                    }
-                }
-            }
-        }
-
-
-        val statusButton = button("Refresh status (cached)") {
-            val t = token
-            val v = vehicle
-            if (t == null || v == null) {
-                outputText.text = "Login first.\n"
-                return@button
-            }
-            outputText.text = "Fetching cached status…\n"
-            thread {
-                try {
-                    val status = api.getCachedStatus(t, v)
-                    runOnUiThread {
-                        outputText.text = buildString {
-                            append("Vehicle: ${status.vehicle.name}\n")
-                            append("Locked: ${status.locked}\n")
-                            status.fuelLevelPercent?.let { append("Fuel level: $it%\n") }
-                            status.lastUpdatedUtc?.let { append("Last updated (UTC): $it\n") }
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            Toast.makeText(this, "Send failed: ${e.message}", Toast.LENGTH_LONG).show()
                         }
                     }
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        outputText.text = "FAILED: ${e.message}\n"
-                    }
                 }
             }
-        }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
 
-        val root = ScrollView(this).apply {
-            setBackgroundColor(Color.rgb(13, 27, 42))
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(18), dp(24), dp(18), dp(24))
-                    addView(title("Kia Companion — K1 diagnostics"))
-                    addView(spacer())
-                    addView(label("Kia Connect email"))
-                    addView(usernameInput)
-                    addView(spacer())
-                    addView(label("Password"))
-                    addView(passwordInput)
-                    addView(spacer())
-                    addView(label("PIN (optional)"))
-                    addView(pinInput)
-                    addView(spacer())
-                    addView(LinearLayout(this@MainActivity).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER
-                        addView(loginButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                            marginEnd = dp(8)
-                        })
-                        addView(statusButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                    })
-                    addView(spacer())
-                    addView(label("OTP code"))
-                    addView(otpInput)
-                    addView(otpButton)
-                    addView(smsButton)
-                    addView(emailButton)
-                    addView(spacer())
-                    addView(copyButton)
-                    addView(refreshLogButton)
-                    addView(spacer())
-                    addView(label("Service log"))
-                    addView(logText)
-                    addView(spacer())
-                    addView(label("Output"))
-                    addView(outputText)
-                },
-            )
+    // ---------- otp screen ----------------------------------------------------
+
+    @SuppressLint("SetTextI18n")
+    private fun showOtpScreen(notifyType: String) {
+        clearContent()
+        addView(title("Verify code"))
+        addView(subtitle("Enter the 6-digit code sent via $notifyType"))
+
+        val otpInput = field("6-digit code", InputType.TYPE_CLASS_NUMBER, imeDone = true)
+        addView(otpInput)
+        addView(spacer())
+        addView(button("Verify") { doVerifyOtp(otpInput) })
+        addView(spacer())
+        statusText = outputLine()
+        addView(statusText)
+        otpInput.requestFocus()
+    }
+
+    private fun doVerifyOtp(otpInput: EditText) {
+        val otp = pendingOtp
+        val deviceId = pendingDeviceId
+        val notifyType = pendingNotifyType ?: "SMS"
+        val code = otpInput.text.toString().trim()
+        if (otp == null || deviceId == null) {
+            statusText.text = "No verification pending — log in again."
+            return
         }
-        setContentView(root)
+        if (code.length < 6) {
+            statusText.text = "Enter the 6-digit code."
+            return
+        }
+        statusText.text = "Verifying…"
+        thread {
+            try {
+                val newToken = api.verifyOtpAndCompleteLogin(
+                    getPrefs().getString("username", "").orEmpty(),
+                    getPrefs().getString("password", "").orEmpty(),
+                    getPrefs().getString("pin", "").orEmpty(),
+                    deviceId,
+                    otp,
+                    code,
+                )
+                persistSession(newToken)
+                pendingOtp = null
+                runOnUiThread { showStatusScreen(autoFetch = true) }
+            } catch (e: Exception) {
+                runOnUiThread { statusText.text = "FAILED: ${e.message}" }
+            }
+        }
+    }
+
+    // ---------- status screen -------------------------------------------------
+
+    @SuppressLint("SetTextI18n")
+    private fun showStatusScreen(autoFetch: Boolean = false) {
+        clearContent()
+        startIndicator()
+
+        val indicator = TextView(this).apply {
+            textSize = 14f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(dp(2), dp(2), dp(2), dp(8))
+        }
+        addView(indicator)
+        indicatorRunnable = object : Runnable {
+            override fun run() {
+                val seenAt = PebbleWatchStore.lastWatchMessageAt(this@MainActivity)
+                val connected = seenAt > 0 && System.currentTimeMillis() - seenAt < 90_000
+                indicator.text = if (connected) "● Pebble connected" else "● Pebble disconnected"
+                indicator.setTextColor(if (connected) colorGreen else colorRed)
+                uiHandler.postDelayed(this, 5000)
+            }
+        }
+        uiHandler.post(indicatorRunnable!!)
+
+        addView(title("Kia"))
+        addView(spacer())
+        statusText = outputLine()
+        addView(statusText)
+        addView(spacer())
+        addView(button("Refresh status") { fetchStatus() })
+        addView(button("Service log", emphasis = false) { showServiceLog() })
+        addView(spacer())
+        addView(label("Service log (long-press to select)"))
+        addView(outputLineSelectable(getPrefsKey("log_hint")))
+
+        if (autoFetch) {
+            fetchStatus()
+        } else {
+            renderLastKnown()
+        }
     }
 
     @SuppressLint("SetTextI18n")
-    private fun fetchAndShowStatus(prefix: String) {
-        val t = token
-        if (t == null) {
-            runOnUiThread { outputText.text = "Login first.\n" }
+    private fun renderLastKnown() {
+        val prefs = getPrefs()
+        val name = prefs.getString("vehicle_name", null)
+        if (name.isNullOrBlank()) {
+            statusText.text = "Press Refresh status to load the car."
             return
         }
+        statusText.text = buildString {
+            append(name)
+            append("\n")
+            append(if (prefs.getBoolean("last_locked", true)) "Locked" else "Unlocked")
+            append("\nFuel level: ${prefs.getInt("last_fuel", -1)}%")
+            val odo = prefs.getInt("last_odo", -1)
+            if (odo >= 0) append("\nOdometer: $odo mi")
+            prefs.getString("last_updated", null)?.let { append("\nLast updated: $it") }
+        }
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun fetchStatus() {
+        statusText.text = "Fetching status…"
         thread {
             try {
-                val vehicles = api.getVehicles(t)
-                vehicle = vehicles.first()
-                val status = api.getCachedStatus(t, vehicle!!)
+                val status = fetchStatusWithAutoRelogin()
+                persistLastStatus(status)
                 runOnUiThread {
-                    outputText.text = buildString {
-                        append(prefix)
-                        append("Vehicles: ${vehicles.size}\n")
-                        for (v in vehicles) {
-                            append("- ${v.name} (${v.model})\n")
-                        }
-                        append("\nSTATUS\n")
-                        append("Vehicle: ${status.vehicle.name}\n")
-                        append("Locked: ${status.locked}\n")
-                        status.fuelLevelPercent?.let { append("Fuel level: $it%\n") }
-                        status.odometerMiles?.let { append("Odometer: ${it.toInt()} mi\n") }
-                        status.lastUpdatedUtc?.let { append("Last updated (UTC): $it\n") }
-                        append("\nK1 AUTH + STATUS PROVEN — ready for watch wiring.")
+                    statusText.text = buildString {
+                        append(status.vehicle.name)
+                        append("\n")
+                        append(if (status.locked) "Locked" else "Unlocked")
+                        append("\nFuel level: ${status.fuelLevelPercent ?: "?"}%")
+                        status.odometerMiles?.let { append("\nOdometer: ${it.toInt()} mi") }
+                        status.lastUpdatedUtc?.let { append("\nLast updated (UTC): $it") }
+                        append("\n\nConnected to Kia ✓")
                     }
                 }
             } catch (e: Exception) {
-                runOnUiThread {
-                    outputText.text = "FAILED: ${e.message}\n"
-                }
+                runOnUiThread { statusText.text = "FAILED: ${e.message}" }
             }
         }
     }
 
-    private fun showServiceLog() {
-        logText.text = com.mosfettlabs.kiacompanion.pebble.ServiceLog.read(this)
+    private fun fetchStatusWithAutoRelogin(): KiaApi.VehicleStatus {
+        val prefs = getPrefs()
+        val username = prefs.getString("username", "").orEmpty()
+        val password = prefs.getString("password", "").orEmpty()
+        val pin = prefs.getString("pin", "").orEmpty()
+        val deviceId = prefs.getString("device_id", null)
+        val sid = prefs.getString("sid", null)
+        val expiry = prefs.getLong("sid_expiry", 0)
+        if (username.isBlank() || password.isBlank()) {
+            throw KiaApi.ApiError("Not logged in.")
+        }
+        val vehicleKey = prefs.getString("vehicle_key", null)
+        val vehicle = if (!vehicleKey.isNullOrBlank()) {
+            KiaApi.Vehicle(
+                id = prefs.getString("vehicle_id", null) ?: vehicleKey,
+                name = prefs.getString("vehicle_name", null) ?: vehicleKey,
+                model = prefs.getString("vehicle_model", null) ?: vehicleKey,
+                key = vehicleKey,
+            )
+        } else {
+            null
+        }
+        if (!sid.isNullOrBlank() && expiry > System.currentTimeMillis() && deviceId != null && vehicle != null) {
+            val stored = KiaApi.Token(
+                username = username,
+                password = password,
+                pin = pin,
+                deviceId = deviceId,
+                sid = sid,
+                validUntilMs = expiry,
+            )
+            try {
+                val status = api.getCachedStatus(stored, vehicle)
+                if (vehicle == null) persistVehicle(vehicle)
+                return status
+            } catch (e: Exception) {
+                if (e.message?.contains("session invalid", ignoreCase = true) != true) throw e
+                ServiceLog.log(this, "sid invalid — re-login")
+            }
+        }
+        val fresh = api.login(username, password, pin, deviceId) as? KiaApi.Token
+            ?: throw KiaApi.ApiError("Kia wants device verification — log in again to approve.")
+        persistSession(fresh)
+        val veh = vehicle ?: resolveVehicle(fresh)
+        val status = api.getCachedStatus(fresh, veh)
+        persistVehicle(veh)
+        return status
     }
 
-    private fun savePrefs(prefs: android.content.SharedPreferences) {
-        prefs.edit()
-            .putString("username", usernameInput.text.toString().trim())
-            .putString("password", passwordInput.text.toString())
-            .putString("pin", pinInput.text.toString().trim())
+    private fun resolveVehicle(token: KiaApi.Token): KiaApi.Vehicle {
+        val vehicles = api.getVehicles(token)
+        if (vehicles.isEmpty()) throw KiaApi.ApiError("No vehicles on this Kia account.")
+        return vehicles.first()
+    }
+
+    // ---------- shared helpers --------------------------------------------------
+
+    private fun persistSession(session: KiaApi.Token) {
+        getPrefs().edit()
+            .putString("device_id", session.deviceId)
+            .putString("sid", session.sid)
+            .putLong("sid_expiry", session.validUntilMs)
+            .putString("username", session.username)
+            .putString("password", session.password)
+            .putString("pin", session.pin)
             .apply()
     }
 
-    private fun field(hint: String, password: Boolean = false): EditText {
-        return EditText(this).apply {
-            this.hint = hint
-            textSize = 15f
-            isSingleLine = true
-            inputType = if (password) {
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            } else {
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
-            }
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.rgb(120, 145, 170))
-            background = rounded()
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
+    private fun persistVehicle(vehicle: KiaApi.Vehicle) {
+        getPrefs().edit()
+            .putString("vehicle_key", vehicle.key)
+            .putString("vehicle_name", vehicle.name)
+            .putString("vehicle_model", vehicle.model)
+            .putString("vehicle_id", vehicle.id)
+            .apply()
     }
 
-    private fun button(text: String, action: () -> Unit): Button {
-        return Button(this).apply {
-            this.text = text
-            isAllCaps = false
-            textSize = 15f
-            setTextColor(Color.WHITE)
-            background = rounded(Color.rgb(11, 87, 164))
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-            setOnClickListener { action() }
+    private fun persistLastStatus(status: KiaApi.VehicleStatus) {
+        getPrefs().edit()
+            .putBoolean("last_locked", status.locked)
+            .putInt("last_fuel", status.fuelLevelPercent ?: -1)
+            .putInt("last_odo", status.odometerMiles?.toInt() ?: -1)
+            .putString("last_updated", status.lastUpdatedUtc ?: "")
+            .apply()
+    }
+
+    private fun showServiceLog() {
+        Toast.makeText(this, ServiceLog.read(this), Toast.LENGTH_LONG).show()
+        // The full log is shown in the selectable log line below the button.
+        findAndSetLogText(ServiceLog.read(this))
+    }
+
+    private fun findAndSetLogText(text: String) {
+        for (i in 0 until rootLayout.childCount) {
+            val child = rootLayout.getChildAt(i)
+            if (child is TextView && child != statusText && child.text.isNotEmpty() &&
+                child.currentTextColor == colorMuted && child.textSize < 13f) {
+                child.text = text
+                return
+            }
         }
+        addView(outputLineSelectable(text))
+    }
+
+    private fun getPrefs() = getSharedPreferences(PREFS, MODE_PRIVATE)
+
+    private fun getPrefsKey(key: String): String {
+        return getPrefs().getString(key, "") ?: "(no log entries yet — press the button above)"
+    }
+
+    private fun startIndicator() {
+        indicatorRunnable?.let { uiHandler.removeCallbacks(it) }
+        indicatorRunnable = null
+    }
+
+    private fun addView(view: android.view.View) {
+        rootLayout.addView(view)
+        (view.layoutParams as? LinearLayout.LayoutParams)?.setMargins(0, 0, 0, 0)
     }
 
     private fun title(text: String): TextView {
         return TextView(this).apply {
             this.text = text
-            textSize = 20f
+            textSize = 22f
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(Color.rgb(127, 195, 255))
+        }
+    }
+
+    private fun subtitle(text: String): TextView {
+        return TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            setTextColor(colorMuted)
+            setPadding(0, dp(2), 0, dp(10))
         }
     }
 
@@ -362,7 +454,66 @@ class MainActivity : Activity() {
         return TextView(this).apply {
             this.text = text
             textSize = 13f
-            setTextColor(Color.rgb(160, 180, 200))
+            setTextColor(colorMuted)
+        }
+    }
+
+    private fun outputLine(): TextView {
+        return TextView(this).apply {
+            textSize = 14f
+            setTextColor(colorText)
+            setTextIsSelectable(true)
+        }
+    }
+
+    private fun outputLineSelectable(initial: String): TextView {
+        return TextView(this).apply {
+            text = initial
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTextColor(colorMuted)
+            setTextIsSelectable(true)
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+        }
+    }
+
+    private fun field(hint: String, inputType: Int, password: Boolean = false, imeDone: Boolean = false): EditText {
+        return EditText(this).apply {
+            this.hint = hint
+            textSize = 15f
+            isSingleLine = true
+            this.inputType = if (password) {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            } else {
+                inputType
+            }
+            if (imeDone) {
+                imeOptions = EditorInfo.IME_ACTION_DONE
+            }
+            setTextColor(Color.WHITE)
+            setHintTextColor(colorMuted)
+            background = rounded()
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+    }
+
+    private fun button(text: String, emphasis: Boolean = true, action: () -> Unit): Button {
+        return Button(this).apply {
+            this.text = text
+            isAllCaps = false
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            background = rounded(if (emphasis) colorAccent else colorField)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setOnClickListener { action() }
+        }
+    }
+
+    private fun rounded(fill: Int = colorField): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(fill)
+            cornerRadius = dp(10).toFloat()
+            setStroke(dp(1), colorStroke)
         }
     }
 
@@ -370,15 +521,11 @@ class MainActivity : Activity() {
         return android.view.View(this).also { it.minimumHeight = dp(14) }
     }
 
-    private fun rounded(fill: Int = Color.rgb(23, 41, 63)): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(fill)
-            cornerRadius = dp(10).toFloat()
-            setStroke(dp(1), Color.rgb(45, 70, 100))
-        }
-    }
-
     private fun dp(value: Int): Int {
         return (value * resources.displayMetrics.density).toInt()
+    }
+
+    companion object {
+        private const val PREFS = "kia_companion_settings"
     }
 }

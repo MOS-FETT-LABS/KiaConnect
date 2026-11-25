@@ -240,12 +240,14 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
 object PebbleWatchStore {
     fun saveLastWatch(context: Context, watch: WatchIdentifier) {
         context.getSharedPreferences("kia_companion_settings", Context.MODE_PRIVATE)
-            .edit().putString("last_watch", watch.value.toString()).apply()
+            .edit()
+            .putString("last_watch", watch.value)
+            .putLong("last_watch_message_at", System.currentTimeMillis())
+            .apply()
     }
 
-    fun lastWatch(context: Context): WatchIdentifier? {
-        val value = context.getSharedPreferences("kia_companion_settings", Context.MODE_PRIVATE)
-            .getString("last_watch", null) ?: return null
-        return WatchIdentifier(value)
+    fun lastWatchMessageAt(context: Context): Long {
+        return context.getSharedPreferences("kia_companion_settings", Context.MODE_PRIVATE)
+            .getLong("last_watch_message_at", 0)
     }
 }
