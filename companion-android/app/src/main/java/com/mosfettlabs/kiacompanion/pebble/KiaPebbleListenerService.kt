@@ -196,6 +196,7 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
         if (username.isBlank() || password.isBlank()) {
             throw KiaApi.ApiError("Open Kia Companion and log in first.")
         }
+        val storedRmtoken = prefs.getString("rmtoken", null)
         val token = if (!sid.isNullOrBlank() && expiry > System.currentTimeMillis() && !deviceId.isNullOrBlank()) {
             KiaApi.Token(
                 username = username,
@@ -206,13 +207,14 @@ class KiaPebbleListenerService : BasePebbleListenerService() {
                 validUntilMs = expiry,
             )
         } else {
-            val fresh = api.login(username, password, pin, deviceId) as? KiaApi.Token
+            val fresh = api.login(username, password, pin, deviceId, storedRmtoken) as? KiaApi.Token
                 ?: throw KiaApi.ApiError("Kia wants device verification again — open the phone app and log in.")
             prefs.edit()
                 .putString("device_id", fresh.deviceId)
                 .putString("sid", fresh.sid)
                 .putLong("sid_expiry", fresh.validUntilMs)
                 .apply()
+            fresh.rmtoken?.let { prefs.edit().putString("rmtoken", it).apply() }
             fresh
         }
         val vehicle = if (!key.isNullOrBlank() && !name.isNullOrBlank()) {

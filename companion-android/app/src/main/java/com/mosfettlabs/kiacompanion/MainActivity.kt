@@ -128,6 +128,7 @@ class MainActivity : Activity() {
                     password,
                     getPrefs().getString("pin", "").orEmpty(),
                     getPrefs().getString("device_id", null),
+                    getPrefs().getString("rmtoken", null),
                 )
                 when (result) {
                     is KiaApi.Token -> {
@@ -158,11 +159,11 @@ class MainActivity : Activity() {
                 pendingNotifyType = "SMS"
                 sendOtpAndShowScreen(otp, "SMS")
             }
-            .setNeutralButton("Email") { _, _ ->
+            .setNegativeButton("Email") { _, _ ->
                 pendingNotifyType = "EMAIL"
                 sendOtpAndShowScreen(otp, "EMAIL")
             }
-            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Cancel", null)
             .show()
     }
 
@@ -320,6 +321,7 @@ class MainActivity : Activity() {
 
     private fun fetchStatusWithAutoRelogin(): KiaApi.VehicleStatus {
         val prefs = getPrefs()
+        @Suppress("UNUSED_VARIABLE")
         val username = prefs.getString("username", "").orEmpty()
         val password = prefs.getString("password", "").orEmpty()
         val pin = prefs.getString("pin", "").orEmpty()
@@ -358,7 +360,7 @@ class MainActivity : Activity() {
                 ServiceLog.log(this, "sid invalid — re-login")
             }
         }
-        val fresh = api.login(username, password, pin, deviceId) as? KiaApi.Token
+        val fresh = api.login(username, password, pin, deviceId, prefs.getString("rmtoken", null)) as? KiaApi.Token
             ?: throw KiaApi.ApiError("Kia wants device verification — log in again to approve.")
         persistSession(fresh)
         val veh = vehicle ?: resolveVehicle(fresh)
@@ -376,10 +378,12 @@ class MainActivity : Activity() {
     // ---------- shared helpers --------------------------------------------------
 
     private fun persistSession(session: KiaApi.Token) {
-        getPrefs().edit()
+        val editor = getPrefs().edit()
             .putString("device_id", session.deviceId)
             .putString("sid", session.sid)
             .putLong("sid_expiry", session.validUntilMs)
+        session.rmtoken?.let { editor.putString("rmtoken", it) }
+        editor
             .putString("username", session.username)
             .putString("password", session.password)
             .putString("pin", session.pin)

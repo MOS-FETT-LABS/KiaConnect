@@ -28,6 +28,7 @@ class KiaApi {
         val deviceId: String,
         val sid: String,
         val validUntilMs: Long,
+        val rmtoken: String? = null,
     )
 
     data class Vehicle(
@@ -132,7 +133,6 @@ class KiaApi {
     private val jsonType = "application/json;charset=utf-8".toMediaType()
 
     fun apiHeaders(deviceId: String): MutableMap<String, String> {
-        val clientUuid = UUID.nameUUIDFromBytes(deviceId.toByteArray()).toString()
         val offsetHours = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 3600000
         val gmtDate = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US).apply {
             timeZone = java.util.TimeZone.getTimeZone("UTC")
@@ -144,7 +144,7 @@ class KiaApi {
             "apptype" to "L",
             "appversion" to "7.22.0",
             "clientid" to "SPACL716-APL",
-            "clientuuid" to clientUuid,
+            "clientuuid" to deviceId,
             "from" to "SPA",
             "language" to "0",
             "offset" to offsetHours.toString(),
@@ -214,14 +214,21 @@ class KiaApi {
         return pair
     }
 
-    fun login(username: String, password: String, pin: String, storedDeviceId: String?): Any {
+    fun login(username: String, password: String, pin: String, storedDeviceId: String?, storedRmtoken: String? = null): Any {
         if (username.isBlank() || password.isBlank()) {
             throw ApiError("Username and password are required.")
         }
         val deviceId = storedDeviceId ?: UUID.randomUUID().toString().uppercase()
         currentDeviceId = deviceId
+        if (!storedRmtoken.isNullOrBlank()) {
+            try {
+                return refreshWithRmtoken(username, password, pin, deviceId, storedRmtoken)
+            } catch (_: ApiError) {
+                // fall through to the full MFA flow (rmtoken expired or device changed)
+            }
+        }
         val body = JSONObject()
-            .put("deviceKey", deviceId)
+            .put("deviceKey", "")
             .put("deviceType", 2)
             .put("userCredential", JSONObject().put("userId", username).put("password", password))
             .put("tncFlag", 1)
@@ -259,6 +266,45 @@ class KiaApi {
     }
 
     fun currentDeviceId(): String? = currentDeviceId
+
+    /** Step 4: mint a fresh sid from the persisted rmtoken (no MFA). */
+    private fun refreshWithRmtoken(
+        username: String,
+        password: String,
+        pin: String,
+        deviceId: String,
+        rmtoken: String,
+    ): Token {
+        val headers = apiHeaders(deviceId)
+        headers["rmtoken"] = rmtoken
+        val body = JSONObject()
+            .put("deviceKey", deviceId)
+            .put("deviceType", 2)
+            .put("userCredential", JSONObject().put("userId", username).put("password", password))
+        val (text, outHeaders) = postJson("prof/authUser", headers, body.toString())
+        val json = try {
+            JSONObject(text)
+        } catch (_: Exception) {
+            JSONObject()
+        }
+        val payload = json.optJSONObject("payload")
+        if (payload != null && payload.has("otpKey")) {
+            throw ApiError("rmtoken expired — full MFA flow needed.")
+        }
+        val sid = outHeaders["sid"]
+        if (sid.isNullOrBlank()) {
+            throw ApiError("Refresh returned no sid: ${text.take(140)}")
+        }
+        return Token(
+            username = username,
+            password = password,
+            pin = pin,
+            deviceId = deviceId,
+            sid = sid,
+            validUntilMs = System.currentTimeMillis() + LOGIN_TOKEN_LIFETIME_MS,
+            rmtoken = outHeaders["rmtoken"] ?: rmtoken,
+        )
+    }
 
     fun sendOtp(otp: OtpNeeded, notifyType: String) {
         val deviceId = currentDeviceId ?: throw ApiError("Log in first.")
@@ -322,6 +368,7 @@ class KiaApi {
             deviceId = deviceId,
             sid = finalSid,
             validUntilMs = System.currentTimeMillis() + LOGIN_TOKEN_LIFETIME_MS,
+            rmtoken = rmtoken,
         )
     }
 
